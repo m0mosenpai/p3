@@ -193,6 +193,28 @@ Environment variables may be added or modified by using the built-in `export` co
 export MYENVVARNAME=somevalue
 ```
 
+After this command is executed, the `MYENVVARNAME` variable will be present in the environment of any child processes spawned by the shell. 
+
+**Variable substitution**: Whenever the `$` sign is used in a command, it is always followed by a variable name. Variable values should be directly substituted for their names when the shell interprets the command. Tokens in our shell are always separated by white space, and variable names and values are guaranteed to each be a single token. For example, given the command `mv $ab $cd,`, you would need to replace variables `ab` and `cd`. If a variable exists as both the environment variable and a shell variable, the environment variable takes precedence. 
+
+You can assume the following when handling variable assignment:
+- There will be at most one variable assignment per line.
+- Lines containing variable assignments will not include pipes or any other commands.
+- The entire value of the variable will be present on the same line, following the `=` operator. There will not be multi-line values; you do not need to worry about quotation marks surrounding the value. 
+- Variable names and values will not contain spaces or `=` characters.
+- There is no limit on the number of variables you should be able to assign.
+
+**Displaying Variables**: The `env` utility program (not a shell built-in) can be used to print the environment variables. For local variables, we use a built-in command in our shell called `vars`. Vars will print all of the local variables and their values in the format `<var>=<value>`, one variable per line. Variables should be printed in insertion order, with the most recently created variables printing last. Updates to existing variables will modify them in-place in the variable list, without moving them around in the list. Here's an example:
+
+```
+wsh> local a=b
+wsh> local c=d
+wsh> vars
+a=b
+c=d
+wsh> 
+```
+
 ### Paths
 
 In our original example in the beginning, the user typed `ls` and the shell knew it has to execute the program `/bin/ls`. How does your shell know this?
