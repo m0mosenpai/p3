@@ -265,7 +265,7 @@ Here is the list of built-in commands for `wsh`:
 * `local`: Used as `local VAR=<value>` to create or assign variable `VAR` as a shell variable.
 * `vars`: Described earlier in the "environment variables and shell variables" section.
 * `history`: Described earlier in the history section.
-* `ls`: Produces the same output as `ls -1`, however you cannot spawn `ls` program because this is a built-in. This built-in does not implement any parameters.
+* `ls`: Produces the same output as `LANG=C ls -1`, however you cannot spawn `ls` program because this is a built-in. This built-in does not implement any parameters.
 
 ### Miscellaneous Hints
 
