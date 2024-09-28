@@ -99,7 +99,7 @@ prompt> ./wsh script.wsh
 
 One difference between batch and interactive modes: in interactive mode, a prompt is printed (`wsh> `). In batch mode, no prompt should be printed.
 
-You should structure your shell such that it creates a process for each new command (the exception are `built-in` commands, discussed below). Your basic shell should be able to parse a command and run the program corresponding to the command. For example, if the user types `ls -la /tmp`, your shell should run the program `/bin/ls` with the given arguments `-la` and `/tmp` (how does the shell know to run `/bin/ls`? It’s something called the shell **path**; more on this below).
+You should structure your shell such that it creates a process for each new command (the exception are `built-in` commands, discussed below). Your basic shell should be able to parse a command and run the program corresponding to the command. For example, if the user types `cp -r /tmp /tmp2`, your shell should run the program `/bin/cp` with the given arguments `-r`, `/tmp` and `/tmp2` (how does the shell know to run `/bin/cp`? It’s something called the shell **path**; more on this below).
 
 ## Structure
 
@@ -217,13 +217,13 @@ wsh>
 
 ### Paths
 
-In our original example in the beginning, the user typed `ls` and the shell knew it has to execute the program `/bin/ls`. How does your shell know this?
+In our original example in the beginning, the user typed `cp` and the shell knew it has to execute the program `/bin/cp`. How does your shell know this?
 
 It turns out that the user must specify a **path** variable to describe the set of directories to search for executables; the set of directories that comprise the path are sometimes called the search path of the shell. The path variable contains the list of all directories to search, in order, when the user types a command.
 
-**Important:** Note that the shell itself does not implement `ls` or other commands (except built-ins). All it does is find those executables in one of the directories specified by path and create a new process to run them. Try `echo $PATH` to see where your shell looks for executables.
+**Important:** Note that the shell itself does not implement `cp` or other commands (except built-ins). All it does is find those executables in one of the directories specified by path and create a new process to run them. Try `echo $PATH` to see where your shell looks for executables.
 
-To check if a particular file exists in a directory and is executable, consider the `access()` system call. For example, when the user types `ls`, and path is set to include both `/usr/bin` and `/bin` (assuming empty path list at first, `/bin` is added, then `/usr/bin` is added), try `access("/usr/bin/ls", X_OK)`. If that fails, try `/bin/ls`. If that fails too, it is an error.
+To check if a particular file exists in a directory and is executable, consider the `access()` system call. For example, when the user types `cp`, and path is set to include both `/usr/bin` and `/bin` (assuming empty path list at first, `/bin` is added, then `/usr/bin` is added), try `access("/usr/bin/cp", X_OK)`. If that fails, try `/bin/cp`. If that fails too, it is an error.
 
 Your initial shell path should contain one directory: `/bin`
 
@@ -244,7 +244,7 @@ wsh> history
 2)  man exec
 3)  rm -rf a
 4)  mkdir a
-5)  ls
+5)  ps
 ```
 
 By default, history should store up to five commands. The length of the history should be configurable, using `history set <n>`, where `n` is an integer. If there are fewer commands in the history than its capacity, simply print the commands that are stored (do not print blank lines for empty slots). If a larger history is shrunk using `history set`, drop the commands which no longer fit into the history. 
@@ -269,7 +269,7 @@ Here is the list of built-in commands for `wsh`:
 
 ### Miscellaneous Hints
 
-Remember to get the basic functionality of your shell working before worrying about all of the error conditions and end cases. For example, first get a single command running (probably first a command with no arguments, such as `ls`).
+Remember to get the basic functionality of your shell working before worrying about all of the error conditions and end cases. For example, first get a single command running (probably first a command with no arguments, such as `ps`).
 
 Next, add built-in commands. Then, try working on command history, redirections, and variables. Each of these requires a little more effort on parsing, but each should not be too hard to implement. It is recommended that you separate the process of parsing and execution - parse first, look for syntax errors (if any), and then finally execute the commands.
 
