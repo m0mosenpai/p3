@@ -1,9 +1,9 @@
 CC = gcc
 # Asan and Valgrind conflict:
 # 1. Asan
-CFLAGS-common = -Wall -Wextra -Werror -pedantic -std=gnu18 -fsanitize=address -fno-omit-frame-pointer
+# CFLAGS-common = -Wall -Wextra -Werror -pedantic -std=gnu18 -fsanitize=address -fno-omit-frame-pointer
 # 2. Valgrind
-# CFLAGS-common = -Wall -Wextra -Werror -pedantic -std=gnu18 -fno-omit-frame-pointer
+CFLAGS-common = -Wall -Wextra -Werror -pedantic -std=gnu18 -fno-omit-frame-pointer
 CFLAGS = $(CFLAGS-common) -O2
 CFLAGS-dbg = $(CFLAGS-common) -g -Og -ggdb
 # LDFLAGS = -static-libasan
