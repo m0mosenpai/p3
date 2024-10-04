@@ -1,4 +1,3 @@
-#include <linux/limits.h>
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -6,52 +5,35 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <linux/limits.h>
+#include <sys/wait.h>
 #include "wsh.h"
 
-#define DELIM " "
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
 #define TOTAL_BUILTINS 7
 
-int exec_cmd(size_t argc, char **args) {
-    /*printf("INSIDE exec_cmd\n");*/
-    /*printf("argc: %zu\n", argc);*/
-    /*for (size_t i = 0; i < argc; i ++) {*/
-    /*    printf("%s ", args[i]);*/
-    /*}*/
-    /*printf("\n");*/
-    char *builtins[TOTAL_BUILTINS] = {
-        EXIT,
-        CD,
-        EXPORT,
-        LOCAL,
-        VARS,
-        HISTORY,
-        LS
-    };
+char *PATH = "/bin:";
 
-    int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
-        &wsh_exit,
-        &wsh_cd,
-        &wsh_export,
-        &wsh_local,
-        &wsh_vars,
-        &wsh_history,
-        &wsh_ls,
-    };
+static char *builtins[TOTAL_BUILTINS] = {
+    EXIT,
+    CD,
+    EXPORT,
+    LOCAL,
+    VARS,
+    HISTORY,
+    LS
+};
 
-    size_t i = 0;
-    if (argc == 0) return -1;
-    for (; i < TOTAL_BUILTINS; i++) {
-        /*printf("Len: %zu, Builtin: %s\n", strlen(builtins[i]), builtins[i]);*/
-        /*printf("Len: %zu, Cmd: %s\n", strlen(args[0]), builtins[i]);*/
-        if (strcmp(args[0], builtins[i]) == 0) {
-            /*printf("%s Matched!\n", builtins[i]);*/
-            return ((*builtin_fn[i])(argc, args));
-        }
-    }
-    return -1;
-}
+static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
+    &wsh_exit,
+    &wsh_cd,
+    &wsh_export,
+    &wsh_local,
+    &wsh_vars,
+    &wsh_history,
+    &wsh_ls,
+};
 
 // free string/ string lists
 void freev(void **ptr, int len, int free_seg) {
@@ -60,6 +42,44 @@ void freev(void **ptr, int len, int free_seg) {
     if (free_seg) free(ptr);
 }
 
+int exec_in_new_proc(char *cmd, char **args) {
+    pid_t child_pid, wpid;
+    int status;
+    child_pid = fork();
+    if (child_pid == -1) return -1;
+    else if (child_pid == 0) {
+        if(execv(cmd, args) == -1) return -1;
+    }
+    else {
+        do {
+            wpid = waitpid(child_pid, &status, WUNTRACED);
+            if (wpid == -1) return -1;
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+    }
+    return 0;
+}
+
+int exec_cmd(size_t argc, char **argv) {
+    // 1. check if cmd is built-in
+    if (argc == 0) return -1;
+    for (size_t i = 0; i < TOTAL_BUILTINS; i++) {
+        if (strcmp(argv[0], builtins[i]) == 0) {
+            return ((*builtin_fn[i])(argc, argv));
+        }
+    }
+    // 2. check if cmd full-path is valid
+    if (access(argv[0], X_OK) == 0) {
+        return exec_in_new_proc(argv[0], argv);
+    }
+    // TO-DO
+    // 3. check paths in $PATH
+    else {
+        printf("Checking in $PATH\n");
+        return 0;
+    }
+    // invalid command
+    return -1;
+}
 
 int main(int argc, char *argv[]) {
     // batch mode
@@ -93,8 +113,9 @@ int main(int argc, char *argv[]) {
         ssize_t read;
         size_t tokenListSize = MIN_TOKEN_LIST_SIZE;
         size_t tokenCnt = 0;
+        char delim[2] = " ";
         while ((read = getline(&line, &len, stdin)) != -1) {
-            char *token = strtok(line, DELIM);
+            char *token = strtok(line, delim);
             tokenCnt = 0;
             while (token != NULL) {
                 // strip newline char
@@ -116,13 +137,15 @@ int main(int argc, char *argv[]) {
 
                 strcpy(tokenList[tokenCnt], token);
                 tokenCnt++;
-                token = strtok(NULL, DELIM);
+                token = strtok(NULL, delim);
             }
             if (exec_cmd(tokenCnt, tokenList) != 0) {
                 freev((void*)tokenList, tokenListSize-1, 1);
                 free(line);
                 return -1;
             }
+            // free tokenized elements from list
+            freev((void*)tokenList, tokenListSize-1, 0);
             printf("wsh> ");
         }
         freev((void*)tokenList, tokenListSize-1, 1);
@@ -150,13 +173,29 @@ int wsh_cd(size_t argc, char** args) {
     return 0;
 }
 
+// Usage: export <name>=<val> 
 int wsh_export(size_t argc, char** args) {
-    if (argc != 1 || args == NULL) return -1;
+    if (argc != 2) return -1;
+
+    // guaranteed to have one var assignment in one line
+    const size_t nvars = 2;
+    char **tokens = malloc(nvars * sizeof(char*));
+    char delim[2] = "=";
+    char *token = strtok(args[1], delim);
+    size_t cnt = 0;
+    while (token != NULL) {
+        if (cnt > nvars-1) return -1;
+        tokens[cnt] = malloc(strlen(token) + 1);
+        strcpy(tokens[cnt++], token);
+        token = strtok(NULL, delim);
+    }
+    if (setenv(tokens[0], tokens[1], 1) != 0) return -1;
+    freev((void*)tokens, nvars-1, 1);
     return 0;
 }
 
 int wsh_local(size_t argc, char** args) {
-    if (argc != 1 || args == NULL) return -1;
+    if (argc != 2 || args == NULL) return -1;
     return 0;
 }
 
