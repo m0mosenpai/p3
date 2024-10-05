@@ -12,8 +12,8 @@
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
 #define TOTAL_BUILTINS 7
-
-char *PATH = "/bin:";
+#define PATH "PATH"
+#define DEFAULT_PATH "/bin"
 
 static char *builtins[TOTAL_BUILTINS] = {
     EXIT,
@@ -71,17 +71,39 @@ int exec_cmd(size_t argc, char **argv) {
     if (access(argv[0], X_OK) == 0) {
         return exec_in_new_proc(argv[0], argv);
     }
-    // TO-DO
-    // 3. check paths in $PATH
-    else {
-        printf("Checking in $PATH\n");
-        return 0;
+
+    // 3. check in $PATH
+    char *path = getenv(PATH);
+    if (path != NULL) {
+        char delim[2] = ":";
+        char *token = strtok(path, delim);
+        while (token != NULL) {
+            printf("Token: %s\n", token);
+            size_t pathlen = strlen(token) + strlen("/") + strlen(argv[0]) + 1;
+            char *fullpath = malloc(pathlen);
+            snprintf(fullpath, pathlen, "%s/%s", token, argv[0]);
+            printf("Full Path: %s\n", fullpath);
+            // ??? breaks out of loop on a failed access?
+            if (access(fullpath, X_OK) == 0) {
+                printf("Accessible! Executing...\n");
+                int rc =  exec_in_new_proc(fullpath, argv);
+                free(fullpath);
+                return rc;
+            }
+            free(fullpath);
+            token = strtok(NULL, delim);
+        }
     }
-    // invalid command
+
+    // else, invalid cmd
+    printf("Invalid Command!\n");
     return -1;
 }
 
 int main(int argc, char *argv[]) {
+    // intialize default PATH
+    if (setenv("PATH", DEFAULT_PATH, 1) != 0) return -1;
+
     // batch mode
     if (argc == 2) {
         const char *scriptFile = argv[1];
