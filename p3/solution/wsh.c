@@ -12,12 +12,17 @@
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
 #define TOTAL_BUILTINS 7
-#define TOTAL_LOCALS 5
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
 
 // shell locals
-/*static char *locals[TOTAL_LOCALS];*/
+typedef struct localvar {
+    size_t idx;
+    char *name;
+    char *value;
+    struct localvar *next;
+} localvar;
+localvar *head = NULL;
 
 
 // shell built-ins
@@ -43,16 +48,27 @@ static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
 
 
 // shell return code
-int shell_rc = -1;
+int shell_rc = 0;
 
+// fetch variable value, if exists
 char *fetch_if_var(char *token) {
     char *pre = "$";
     if (strncmp(pre, token, strlen(pre)) == 0) {
         char *tok = strtok(token, pre);
 
+        // 1. check env
         char *val;
         if ((val = getenv(tok)) != NULL) {
             return val;
+        }
+
+        // 2. check local
+        localvar *i = head;
+        while (i != NULL) {
+            if (strcmp(tok, i->name) == 0) {
+                return i->value;
+            }
+            i = i->next;
         }
     }
     return NULL;
@@ -347,24 +363,54 @@ int wsh_local(size_t argc, char** args) {
         token = strtok(NULL, delim);
     }
 
-    // TO-DO: set value as empty if key/value pair is missing
+    localvar *newvar = malloc(sizeof(localvar));
+    // set val as empty if not provided
     if (cnt < nvars) {
-        fprintf(stderr, "local: key/value pair missing\n");
-        freev((void*)tokens, nvars-1, 1);
-        return -1;
+        newvar->value = malloc(strlen("") + 1);
+        strcpy(newvar->value, "");
     }
+    else {
+        newvar->value = malloc(strlen(tokens[1]) + 1);
+        strcpy(newvar->value, tokens[1]);
+    }
+    newvar->name = malloc(strlen(tokens[0]) + 1);
+    strcpy(newvar->name, tokens[0]);
 
-    // TO-DO: implement linked list
-    size_t total_len = strlen(tokens[0]) + strlen("=") + strlen(tokens[1]) + 1;
-    char *lkv_pair = malloc(total_len);
-    snprintf(lkv_pair, total_len, "%s=%s", tokens[0], tokens[1]);
+    if (head == NULL) {
+        newvar->idx = 0;
+        newvar->next = NULL;
+    }
+    else {
+        newvar->next = head;
+        newvar->idx = head->idx+1;
+    }
+    head = newvar;
+
+    /*localvar *i = head;*/
+    /*while (i != NULL) {*/
+    /*    printf("[%p] idx: %zu, name: %s, val: %s, next: %p\n",*/
+    /*            (void*)i,*/
+    /*            i->idx,*/
+    /*            i->name,*/
+    /*            i->value,*/
+    /*            (void*)i->next*/
+    /*    );*/
+    /*    i = i->next;*/
+    /*}*/
 
     freev((void*)tokens, nvars-1, 1);
     return 0;
 }
 
+// Usage: vars
 int wsh_vars(size_t argc, char** args) {
     if (argc != 1 || args == NULL) return -1;
+
+    localvar *i = head;
+    while (i != NULL) {
+        printf("%s=%s\n", i->name, i->value);
+        i = i->next;
+    }
     return 0;
 }
 
