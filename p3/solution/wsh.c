@@ -12,9 +12,15 @@
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
 #define TOTAL_BUILTINS 7
+#define TOTAL_LOCALS 5
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
 
+// shell locals
+/*static char *locals[TOTAL_LOCALS];*/
+
+
+// shell built-ins
 static char *builtins[TOTAL_BUILTINS] = {
     EXIT,
     CD,
@@ -34,6 +40,23 @@ static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
     &wsh_history,
     &wsh_ls,
 };
+
+
+// shell return code
+int shell_rc = -1;
+
+char *fetch_if_var(char *token) {
+    char *pre = "$";
+    if (strncmp(pre, token, strlen(pre)) == 0) {
+        char *tok = strtok(token, pre);
+
+        char *val;
+        if ((val = getenv(tok)) != NULL) {
+            return val;
+        }
+    }
+    return NULL;
+}
 
 // free string/ string lists
 void freev(void **ptr, int len, int free_seg) {
@@ -60,32 +83,93 @@ int exec_in_new_proc(char *cmd, char **args) {
 }
 
 int exec_cmd(size_t argc, char **argv) {
+    if (argc == 0 || argv == NULL) {
+        fprintf(stderr, "wsh: cmd can't be empty!\n");
+        return -1;
+    }
+
+    // handle vars, if any
+    char *var_v = NULL;
+    for (size_t i = 0; i < argc; i++) {
+        // check for whole variables strings
+        if ((var_v = fetch_if_var(argv[i])) != NULL) {
+            argv[i] = realloc(argv[i], strlen(var_v) + 1);
+            strcpy(argv[i], var_v);
+            continue;
+        }
+
+        // check for variables in key/value pairs
+        char *ptr = NULL;
+        if ((ptr = strchr(argv[i], '=')) != NULL) {
+            char delim[2] = "=";
+            size_t cnt = 0;
+            const size_t nvars = 2;
+            size_t ttok_len = 0;
+            char *token = strtok(argv[i], delim);
+            char **tokens = malloc(nvars * sizeof(char*));
+            while (token != NULL) {
+                if (cnt > nvars-1) {
+                    fprintf(stderr, "wsh: ignoring extra tokens while parsing key/value pair\n");
+                    break;
+                }
+
+                ptr = NULL;
+                var_v = NULL;
+                if ((ptr = strchr(token, '$')) != NULL) {
+                    if (cnt == 0) {
+                        fprintf(stderr, "wsh: $ not allowed in variable names\n");
+                        freev((void*)tokens, nvars-1, 1);
+                        return -1;
+                    }
+
+                    if ((var_v = fetch_if_var(token)) != NULL) {
+                        tokens[cnt] = malloc(strlen(var_v) + 1);
+                        strcpy(tokens[cnt], var_v);
+                        ttok_len += strlen(var_v);
+                    }
+                }
+
+                if (var_v == NULL) {
+                    tokens[cnt] = malloc(strlen(token) + 1);
+                    strcpy(tokens[cnt], token);
+                    ttok_len += strlen(token);
+                }
+                cnt++;
+                token = strtok(NULL, delim);
+            }
+
+            argv[i] = realloc(argv[i], ttok_len + 1);
+            snprintf(argv[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
+            freev((void*)tokens, nvars-1, 1);
+            continue;
+        }
+    }
+
     // 1. check if cmd is built-in
-    if (argc == 0) return -1;
     for (size_t i = 0; i < TOTAL_BUILTINS; i++) {
         if (strcmp(argv[0], builtins[i]) == 0) {
             return ((*builtin_fn[i])(argc, argv));
         }
     }
-    // 2. check if cmd full-path is valid
+    // 2. check if cmd is a full-path to executable
     if (access(argv[0], X_OK) == 0) {
         return exec_in_new_proc(argv[0], argv);
     }
 
-    // 3. check in $PATH
+    // 3. check if cmd path can be found in $PATH
     char *path = getenv(PATH);
     if (path != NULL) {
         char delim[2] = ":";
         char *token = strtok(path, delim);
         while (token != NULL) {
-            printf("Token: %s\n", token);
-            size_t pathlen = strlen(token) + strlen("/") + strlen(argv[0]) + 1;
+            size_t pathlen = 0;
+            pathlen = strlen(token) + strlen("/") + strlen(argv[0]) + 1;
             char *fullpath = malloc(pathlen);
             snprintf(fullpath, pathlen, "%s/%s", token, argv[0]);
-            printf("Full Path: %s\n", fullpath);
+
             // ??? breaks out of loop on a failed access?
+            // ??? PATH keeps getting overwritten
             if (access(fullpath, X_OK) == 0) {
-                printf("Accessible! Executing...\n");
                 int rc =  exec_in_new_proc(fullpath, argv);
                 free(fullpath);
                 return rc;
@@ -95,22 +179,26 @@ int exec_cmd(size_t argc, char **argv) {
         }
     }
 
-    // else, invalid cmd
-    printf("Invalid Command!\n");
+    fprintf(stderr, "wsh: invalid command\n");
     return -1;
 }
 
 int main(int argc, char *argv[]) {
     // intialize default PATH
-    if (setenv("PATH", DEFAULT_PATH, 1) != 0) return -1;
+    if (setenv(PATH, DEFAULT_PATH, 1) != 0) {
+        fprintf(stderr, "setenv: failed to initialize PATH\n");
+        shell_rc = -1;
+        return shell_rc;
+    }
 
     // batch mode
     if (argc == 2) {
         const char *scriptFile = argv[1];
         FILE *script = fopen(scriptFile, "r");
         if (script == NULL) {
-            perror("fopen: script file not found!\n");
-            return -1;
+            fprintf(stderr, "fopen: script file not found!\n");
+            shell_rc = -1;
+            return shell_rc;
         }
 
         /*char *line = NULL;*/
@@ -126,8 +214,9 @@ int main(int argc, char *argv[]) {
 
         char **tokenList = malloc(MIN_TOKEN_LIST_SIZE * sizeof(char*));
         if (tokenList == NULL){
-            perror("malloc: failed to allocate memory for token list\n");
-            return -1;
+            fprintf(stderr, "malloc: failed to allocate memory for token list\n");
+            shell_rc = -1;
+            return shell_rc;
         }
 
         char *line = NULL;
@@ -151,21 +240,19 @@ int main(int argc, char *argv[]) {
                 }
                 tokenList[tokenCnt] = malloc(tokenSize + 1);
                 if (tokenList[tokenCnt] == NULL) {
-                    perror("malloc: failed to allocate memory for tokens\n");
+                    fprintf(stderr, "malloc: failed to allocate memory for tokens\n");
                     freev((void*)tokenList, tokenListSize-1, 1);
                     free(line);
-                    return -1;
+                    shell_rc = -1;
+                    return shell_rc;
                 }
 
                 strcpy(tokenList[tokenCnt], token);
                 tokenCnt++;
                 token = strtok(NULL, delim);
             }
-            if (exec_cmd(tokenCnt, tokenList) != 0) {
-                freev((void*)tokenList, tokenListSize-1, 1);
-                free(line);
-                return -1;
-            }
+            shell_rc = exec_cmd(tokenCnt, tokenList);
+
             // free tokenized elements from list
             freev((void*)tokenList, tokenListSize-1, 0);
             printf("wsh> ");
@@ -174,50 +261,105 @@ int main(int argc, char *argv[]) {
         free(line);
     }
     else {
-        printf("Usage: %s <script>\n", argv[0]);
-        return -1;
+        fprintf(stderr, "Usage: %s <script>\n", argv[0]);
+        shell_rc = -1;
     }
     
-    return 0;
+    return shell_rc;
 }
 
 // Usage: exit
 int wsh_exit(size_t argc, char** args) {
-    if (argc != 1) return -1;
+    if (argc != 1) {
+        fprintf(stderr, "Usage: %s\n", args[0]);
+        return -1;
+    }
     freev((void*)args, argc-1, 1);
-    exit(0);
+    // TO-FIX: possible memory leak ("line" in main loop)
+    exit(shell_rc);
 }
 
 // Usage: cd <dir-path>
 int wsh_cd(size_t argc, char** args) {
-    if (argc != 2) return -1;
-    if (chdir(args[1]) != 0) return -1;
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <dir>\n", args[0]);
+        return -1;
+    }
+    char *var_v = fetch_if_var(args[1]);
+    if (chdir(var_v == NULL ? args[1] : var_v) != 0) {
+        fprintf(stderr, "chdir: failed to cd\n");
+        return -1;
+    }
     return 0;
 }
 
-// Usage: export <name>=<val> 
+// Usage: export <name>=<val>
+//        export <name>=$VAR
 int wsh_export(size_t argc, char** args) {
-    if (argc != 2) return -1;
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <var>=<val>\n", args[0]);
+        return -1;
+    }
 
-    // guaranteed to have one var assignment in one line
+    size_t cnt = 0;
     const size_t nvars = 2;
-    char **tokens = malloc(nvars * sizeof(char*));
     char delim[2] = "=";
     char *token = strtok(args[1], delim);
-    size_t cnt = 0;
+    char **tokens = malloc(nvars * sizeof(char*));
     while (token != NULL) {
-        if (cnt > nvars-1) return -1;
         tokens[cnt] = malloc(strlen(token) + 1);
         strcpy(tokens[cnt++], token);
         token = strtok(NULL, delim);
     }
-    if (setenv(tokens[0], tokens[1], 1) != 0) return -1;
+
+    // should have atleast 2 tokens for key-val pair
+    if (cnt < nvars) {
+        fprintf(stderr, "export: key/value pair missing\n");
+        freev((void*)tokens, nvars-1, 1);
+        return -1;
+    }
+
+    int rc = 0;
+    if ((rc = setenv(tokens[0], tokens[1], 1)) != 0) {
+        fprintf(stderr, "export: failed to setenv\n");
+        rc = -1;
+    }
     freev((void*)tokens, nvars-1, 1);
-    return 0;
+    return rc;
 }
 
+// Usage: local <name>=<val>
+//        local <name>=$VAR
 int wsh_local(size_t argc, char** args) {
-    if (argc != 2 || args == NULL) return -1;
+    if (argc != 2 || args == NULL) {
+        fprintf(stderr, "Usage: %s <var>=<val>\n", args[0]);
+        return -1;
+    }
+
+    size_t cnt = 0;
+    const size_t nvars = 2;
+    char delim[2] = "=";
+    char *token = strtok(args[1], delim);
+    char **tokens = malloc(nvars * sizeof(char*));
+    while (token != NULL) {
+        tokens[cnt] = malloc(strlen(token) + 1);
+        strcpy(tokens[cnt++], token);
+        token = strtok(NULL, delim);
+    }
+
+    // TO-DO: set value as empty if key/value pair is missing
+    if (cnt < nvars) {
+        fprintf(stderr, "local: key/value pair missing\n");
+        freev((void*)tokens, nvars-1, 1);
+        return -1;
+    }
+
+    // TO-DO: implement linked list
+    size_t total_len = strlen(tokens[0]) + strlen("=") + strlen(tokens[1]) + 1;
+    char *lkv_pair = malloc(total_len);
+    snprintf(lkv_pair, total_len, "%s=%s", tokens[0], tokens[1]);
+
+    freev((void*)tokens, nvars-1, 1);
     return 0;
 }
 
@@ -234,10 +376,16 @@ int wsh_history(size_t argc, char** args) {
 
 // Usage: ls
 int wsh_ls(size_t argc, char** args) {
-    if (argc != 1 || args == NULL) return -1;
+    if (argc != 1 || args == NULL) {
+        fprintf(stderr, "Usage: %s\n", args[0]);
+        return -1;
+    }
 
     char path[PATH_MAX];
-    if (getcwd(path, sizeof(path)) == NULL) return -1;
+    if (getcwd(path, sizeof(path)) == NULL) {
+        fprintf(stderr, "ls: failed to getcwd\n");
+        return -1;
+    }
 
     struct dirent **names;
     int n;
