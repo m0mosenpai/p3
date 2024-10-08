@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <linux/limits.h>
 #include <sys/wait.h>
+#include <errno.h>
 #include "wsh.h"
 
 #define MIN_INPUT_SIZE 16
@@ -14,15 +15,7 @@
 #define TOTAL_BUILTINS 7
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
-
-// shell locals
-typedef struct localvar {
-    size_t idx;
-    char *name;
-    char *value;
-    struct localvar *next;
-} localvar;
-localvar *head = NULL;
+#define DEFAULT_HISTORY_SIZE 5
 
 
 // shell built-ins
@@ -46,6 +39,118 @@ static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
     &wsh_ls,
 };
 
+// free string/ string lists
+void freev(void **ptr, int len, int free_seg) {
+    if (len < 0) {
+        while (*ptr) {
+            free(*ptr);
+            *ptr++ = NULL;
+        }
+    }
+    else {
+        while (len) {
+            free(ptr[len]);
+            ptr[len--] = NULL;
+        }
+    }
+    if (free_seg) free(ptr);
+}
+
+// command history
+typedef struct hentry {
+    size_t idx;
+    size_t argc;
+    char **argv;
+    struct hentry *next;
+} hentry;
+hentry *hhead = NULL;
+size_t histsize = DEFAULT_HISTORY_SIZE;
+size_t histentries = 0;
+
+// free history memory
+void free_history() {
+    hentry *i = hhead;
+    hentry *tmp = NULL;
+    while (i != NULL) {
+        freev((void*)i->argv, (i->argc)-1, 1);
+        tmp = i->next;
+        free(i);
+        i = tmp;
+    }
+    free(hhead);
+}
+
+// store in history
+void log_cmd(size_t argc, char **argv) {
+    if (histentries < histsize) {
+        if (hhead == NULL) {
+            hentry *newentry = malloc(sizeof(hentry));
+            newentry->argc = argc;
+            newentry->argv = malloc(argc * sizeof(char*));
+            for (size_t i = 0; i < argc; i++) {
+                newentry->argv[i] = malloc(strlen(argv[i]) + 1);
+                strcpy(newentry->argv[i], argv[i]);
+            }
+            newentry->idx = 0;
+            newentry->next = NULL;
+            hhead = newentry;
+            histentries++;
+        }
+        else {
+            // check for consecutively repeating commands
+            int is_repeated = 1;
+            if (hhead->argc == argc) {
+                for (size_t i = 0; i < argc; i++) {
+                    if (hhead->argv[i] == NULL && argv[i] == NULL) continue;
+                    if (hhead->argv[i] == NULL || argv[i] == NULL) { is_repeated = 0; break; }
+                    if (strcmp(hhead->argv[i], argv[i]) != 0) {
+                        is_repeated = 0;
+                        break;
+                    }
+                }
+            }
+            else {
+                is_repeated = 0;
+            }
+
+            if (!is_repeated) {
+                hentry *newentry = malloc(sizeof(hentry));
+                newentry->argc = argc;
+                newentry->argv = malloc(argc * sizeof(char*));
+                for (size_t i = 0; i < argc; i++) {
+                    newentry->argv[i] = malloc(strlen(argv[i]) + 1);
+                    strcpy(newentry->argv[i], argv[i]);
+                }
+                newentry->next = hhead;
+                newentry->idx = hhead->idx+1;
+                hhead = newentry;
+                histentries++;
+            }
+        }
+    }
+}
+
+// shell locals
+typedef struct localvar {
+    size_t idx;
+    char *name;
+    char *value;
+    struct localvar *next;
+} localvar;
+localvar *lhead = NULL;
+
+// free local var memory
+void free_locals() {
+    localvar *i = lhead;
+    while (i != NULL) {
+        free(i->name);
+        free(i->value);
+        localvar *tmp = i->next;
+        free(i);
+        i = tmp;
+    }
+    free(lhead);
+}
 
 // shell return code
 int shell_rc = 0;
@@ -63,7 +168,7 @@ char *fetch_if_var(char *token) {
         }
 
         // 2. check local
-        localvar *i = head;
+        localvar *i = lhead;
         while (i != NULL) {
             if (strcmp(tok, i->name) == 0) {
                 return i->value;
@@ -74,12 +179,6 @@ char *fetch_if_var(char *token) {
     return NULL;
 }
 
-// free string/ string lists
-void freev(void **ptr, int len, int free_seg) {
-    if (len < 0) while (*ptr) {free(*ptr); *ptr++ = NULL;}
-    else while (len) {free(ptr[len]); ptr[len--] = NULL;}
-    if (free_seg) free(ptr);
-}
 
 int exec_in_new_proc(char *cmd, char **args) {
     pid_t child_pid, wpid;
@@ -98,12 +197,7 @@ int exec_in_new_proc(char *cmd, char **args) {
     return 0;
 }
 
-int exec_cmd(size_t argc, char **argv) {
-    if (argc == 0 || argv == NULL) {
-        fprintf(stderr, "wsh: cmd can't be empty!\n");
-        return -1;
-    }
-
+char **parse_cmd(size_t argc, char **argv) {
     // handle vars, if any
     char *var_v = NULL;
     for (size_t i = 0; i < argc; i++) {
@@ -135,7 +229,7 @@ int exec_cmd(size_t argc, char **argv) {
                     if (cnt == 0) {
                         fprintf(stderr, "wsh: $ not allowed in variable names\n");
                         freev((void*)tokens, nvars-1, 1);
-                        return -1;
+                        return NULL;
                     }
 
                     if ((var_v = fetch_if_var(token)) != NULL) {
@@ -160,6 +254,14 @@ int exec_cmd(size_t argc, char **argv) {
             continue;
         }
     }
+    return argv;
+}
+
+int exec_cmd(size_t argc, char **argv) {
+    if (argc == 0 || argv == NULL) {
+        fprintf(stderr, "wsh: cmd can't be empty!\n");
+        return -1;
+    }
 
     // 1. check if cmd is built-in
     for (size_t i = 0; i < TOTAL_BUILTINS; i++) {
@@ -167,6 +269,7 @@ int exec_cmd(size_t argc, char **argv) {
             return ((*builtin_fn[i])(argc, argv));
         }
     }
+
     // 2. check if cmd is a full-path to executable
     if (access(argv[0], X_OK) == 0) {
         return exec_in_new_proc(argv[0], argv);
@@ -183,6 +286,7 @@ int exec_cmd(size_t argc, char **argv) {
             char *fullpath = malloc(pathlen);
             snprintf(fullpath, pathlen, "%s/%s", token, argv[0]);
 
+            // TO-DO
             // ??? breaks out of loop on a failed access?
             // ??? PATH keeps getting overwritten
             if (access(fullpath, X_OK) == 0) {
@@ -207,7 +311,7 @@ int main(int argc, char *argv[]) {
         return shell_rc;
     }
 
-    // batch mode
+    // TO-DO: batch mode
     if (argc == 2) {
         const char *scriptFile = argv[1];
         FILE *script = fopen(scriptFile, "r");
@@ -228,8 +332,8 @@ int main(int argc, char *argv[]) {
     else if (argc == 1) {
         printf("wsh> ");
 
-        char **tokenList = malloc(MIN_TOKEN_LIST_SIZE * sizeof(char*));
-        if (tokenList == NULL){
+        char **tokens = malloc(MIN_TOKEN_LIST_SIZE * sizeof(char*));
+        if (tokens == NULL){
             fprintf(stderr, "malloc: failed to allocate memory for token list\n");
             shell_rc = -1;
             return shell_rc;
@@ -238,42 +342,55 @@ int main(int argc, char *argv[]) {
         char *line = NULL;
         size_t len = 0;
         ssize_t read;
-        size_t tokenListSize = MIN_TOKEN_LIST_SIZE;
-        size_t tokenCnt = 0;
+        size_t ntoks = MIN_TOKEN_LIST_SIZE;
+        size_t cnt = 0;
         char delim[2] = " ";
         while ((read = getline(&line, &len, stdin)) != -1) {
             char *token = strtok(line, delim);
-            tokenCnt = 0;
+            cnt = 0;
             while (token != NULL) {
                 // strip newline char
                 char *ptr = NULL;
                 if ((ptr = strchr(token, '\n'))) *ptr = '\0';
 
                 size_t tokenSize = strlen(token);
-                if (tokenCnt >= tokenListSize) {
-                    tokenListSize *= 2;
-                    tokenList = reallocarray(tokenList, tokenListSize, sizeof(char*));
+                if (cnt >= ntoks) {
+                    ntoks *= 2;
+                    tokens = reallocarray(tokens, ntoks, sizeof(char*));
                 }
-                tokenList[tokenCnt] = malloc(tokenSize + 1);
-                if (tokenList[tokenCnt] == NULL) {
+                tokens[cnt] = malloc(tokenSize + 1);
+                if (tokens[cnt] == NULL) {
                     fprintf(stderr, "malloc: failed to allocate memory for tokens\n");
-                    freev((void*)tokenList, tokenListSize-1, 1);
+                    freev((void*)tokens, ntoks-1, 1);
                     free(line);
                     shell_rc = -1;
                     return shell_rc;
                 }
 
-                strcpy(tokenList[tokenCnt], token);
-                tokenCnt++;
+                strcpy(tokens[cnt], token);
+                cnt++;
                 token = strtok(NULL, delim);
             }
-            shell_rc = exec_cmd(tokenCnt, tokenList);
+
+            // 1. log in history (excluding builtins)
+            int isbuiltin = 0;
+            for (size_t i = 0; i < TOTAL_BUILTINS; i++)
+                if (strcmp(tokens[0], builtins[i]) == 0) { isbuiltin = 1; break; }
+            if (!isbuiltin) log_cmd(cnt, tokens);
+
+            // 2. parse
+            char **parsed_tokens;
+            if ((parsed_tokens = parse_cmd(cnt, tokens)) == NULL) {
+                shell_rc = -1;
+            }
+            // 3. execute
+            else { shell_rc = exec_cmd(cnt, parsed_tokens); }
 
             // free tokenized elements from list
-            freev((void*)tokenList, tokenListSize-1, 0);
+            freev((void*)tokens, ntoks-1, 0);
             printf("wsh> ");
         }
-        freev((void*)tokenList, tokenListSize-1, 1);
+        freev((void*)tokens, ntoks-1, 1);
         free(line);
     }
     else {
@@ -281,6 +398,8 @@ int main(int argc, char *argv[]) {
         shell_rc = -1;
     }
     
+    free_locals();
+    free_history();
     return shell_rc;
 }
 
@@ -291,7 +410,9 @@ int wsh_exit(size_t argc, char** args) {
         return -1;
     }
     freev((void*)args, argc-1, 1);
-    // TO-FIX: possible memory leak ("line" in main loop)
+    // TO-DO: possible memory leak ("line" in main loop)
+    free_locals();
+    free_history();
     exit(shell_rc);
 }
 
@@ -376,28 +497,15 @@ int wsh_local(size_t argc, char** args) {
     newvar->name = malloc(strlen(tokens[0]) + 1);
     strcpy(newvar->name, tokens[0]);
 
-    if (head == NULL) {
+    if (lhead == NULL) {
         newvar->idx = 0;
         newvar->next = NULL;
     }
     else {
-        newvar->next = head;
-        newvar->idx = head->idx+1;
+        newvar->next = lhead;
+        newvar->idx = lhead->idx+1;
     }
-    head = newvar;
-
-    /*localvar *i = head;*/
-    /*while (i != NULL) {*/
-    /*    printf("[%p] idx: %zu, name: %s, val: %s, next: %p\n",*/
-    /*            (void*)i,*/
-    /*            i->idx,*/
-    /*            i->name,*/
-    /*            i->value,*/
-    /*            (void*)i->next*/
-    /*    );*/
-    /*    i = i->next;*/
-    /*}*/
-
+    lhead = newvar;
     freev((void*)tokens, nvars-1, 1);
     return 0;
 }
@@ -406,7 +514,7 @@ int wsh_local(size_t argc, char** args) {
 int wsh_vars(size_t argc, char** args) {
     if (argc != 1 || args == NULL) return -1;
 
-    localvar *i = head;
+    localvar *i = lhead;
     while (i != NULL) {
         printf("%s=%s\n", i->name, i->value);
         i = i->next;
@@ -414,8 +522,106 @@ int wsh_vars(size_t argc, char** args) {
     return 0;
 }
 
+// Usage: history
+//        history <n>
+//        history set <n>
 int wsh_history(size_t argc, char** args) {
-    if (argc != 1 || args == NULL) return -1;
+    if (argc > 3) return -1;
+
+    // print history
+    if (argc == 1 && args[0] != NULL) {
+        hentry *curr = hhead;
+        while (curr != NULL) {
+            printf("%zu) ", (histentries - curr->idx));
+            for (size_t i = 0; i < curr->argc; i++) {
+                if (i == curr->argc-1)
+                    printf("%s\n",(curr->argv)[i]);
+                else
+                    printf("%s ",(curr->argv)[i]);
+            }
+            curr = curr->next;
+        }
+    }
+    // execute nth command
+    else if (argc == 2 && args[1] != NULL) {
+        errno = 0;
+        char *endptr;
+        long val = strtol(args[1], &endptr, 10);
+        if (errno == ERANGE || *endptr != '\0') {
+            fprintf(stderr, "history: n is not a valid numeric value\n");
+            return -1;
+        }
+
+        if (val < 0) {
+            fprintf(stderr, "history: n should be positive\n");
+            return -1;
+        }
+
+        if ((size_t)val <= histentries && (size_t)val <= histsize) {
+            hentry *curr = hhead;
+            while (curr != NULL) {
+                if ((size_t)val == (histentries - curr->idx)) {
+                    // TO-DO: see if parse_cmd can modify list in-place (possible memory leak)
+                    char **parsed_tokens;
+                    if ((parsed_tokens = parse_cmd(curr->argc, curr->argv)) == NULL) return -1;
+                    return exec_cmd(curr->argc, parsed_tokens);
+                }
+                curr = curr->next;
+            }
+        }
+    }
+    // set history size
+    else if (argc == 3 && args[1] != NULL && strcmp(args[1], "set") == 0 && args[2] != NULL) {
+        errno = 0;
+        char *endptr;
+        long val = strtol(args[2], &endptr, 10);
+        if (errno == ERANGE || *endptr != '\0') {
+            fprintf(stderr, "history: n is not a valid numeric value\n");
+            return -1;
+        }
+
+        if (val < 0) {
+            fprintf(stderr, "history: n should be positive\n");
+            return -1;
+        }
+        histsize = (size_t)val;
+        // drop extra entries
+        // TO-DO: logic can be moved into free_history()
+        if (histsize < histentries) {
+            size_t cnt = 0;
+            hentry *curr = hhead;
+            hentry *tmp = NULL;
+            while (curr != NULL) {
+                // remap index values according to new size
+                // TO-DO: overflowing?
+                curr->idx = histsize - cnt - 1;
+
+                // free discarded entries
+                if (cnt > histsize - 1) {
+                    freev((void*)curr->argv, (curr->argc)-1, 1);
+                    tmp = curr->next;
+                    curr->next = NULL;
+                    free(curr);
+                    curr = tmp;
+                }
+
+                // disconnect at new size
+                if (cnt == histsize - 1) {
+                    tmp = curr->next;
+                    curr->next = NULL;
+                    curr = tmp;
+                }
+                // TO-DO: causes SEGV on reducing history from 2 digit -> 1 digit sizes
+                else { curr = curr->next; }
+                cnt++;
+            }
+            histentries = histsize;
+        }
+    }
+    else {
+        fprintf(stderr, "Usage: %s | %s <n> | %s set <n>\n", args[0], args[0], args[0]);
+        return -1;
+    }
     return 0;
 }
 
@@ -438,7 +644,7 @@ int wsh_ls(size_t argc, char** args) {
     n = scandir(path, &names, NULL, alphasort);
     int i = 0;
     char *pre = ".";
-    while (i < n){
+    while (i < n) {
         if (strncmp(pre, names[i]->d_name, strlen(pre)) != 0)
             printf("%s\n", names[i]->d_name);
         free(names[i]);
