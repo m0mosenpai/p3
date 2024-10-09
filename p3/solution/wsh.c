@@ -12,7 +12,7 @@
 
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
-#define TOTAL_BUILTINS 7
+#define TOTAL_BUILTINS 6
 #define TOTAL_REDIRECTIONS 5
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
@@ -82,7 +82,6 @@ void free_history() {
         free(i);
         i = tmp;
     }
-    free(hhead);
 }
 
 // store in history
@@ -154,7 +153,6 @@ void free_locals() {
         free(i);
         i = tmp;
     }
-    free(lhead);
 }
 
 // shell return code
@@ -231,11 +229,9 @@ char **parse_cmd(size_t argc, char **argv) {
             char *token = strtok(arg_dup, delim);
             char **tokens = malloc(nvars * sizeof(char*));
             while (token != NULL) {
-                if (cnt > nvars-1) {
-                    fprintf(stderr, "wsh: ignoring extra tokens while parsing key/value pair\n");
-                    free(arg_dup);
-                    break;
-                }
+                // TO-DO: test this condition
+                // ignore any extra tokens
+                if (cnt > nvars-1) break;
 
                 ptr = NULL;
                 var_v = NULL;
