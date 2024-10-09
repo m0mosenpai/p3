@@ -7,7 +7,6 @@
 #define HISTORY "history"
 #define LS      "ls"
 
-int wsh_exit(size_t argc, char** args);
 int wsh_cd(size_t argc, char** args);
 int wsh_export(size_t argc, char** args);
 int wsh_local(size_t argc, char** args);

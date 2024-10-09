@@ -8,6 +8,7 @@
 #include <linux/limits.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <ctype.h>
 #include "wsh.h"
 
 #define MIN_INPUT_SIZE 16
@@ -62,6 +63,7 @@ void freev(void **ptr, int len, int free_seg) {
 }
 
 // command history
+// TO-DO: History bug - check the last executed cmd instead of last history cmd
 typedef struct hentry {
     size_t idx;
     size_t argc;
@@ -72,7 +74,6 @@ hentry *hhead = NULL;
 size_t histsize = DEFAULT_HISTORY_SIZE;
 size_t histentries = 0;
 
-// free history memory
 void free_history() {
     hentry *i = hhead;
     hentry *tmp = NULL;
@@ -84,7 +85,6 @@ void free_history() {
     }
 }
 
-// store in history
 void log_cmd(size_t argc, char **argv) {
     if (histentries < histsize) {
         if (hhead == NULL) {
@@ -143,7 +143,6 @@ typedef struct localvar {
 } localvar;
 localvar *lhead = NULL;
 
-// free local var memory
 void free_locals() {
     localvar *i = lhead;
     while (i != NULL) {
@@ -155,12 +154,13 @@ void free_locals() {
     }
 }
 
+
 // shell return code
 int shell_rc = 0;
 
 // fetch variable value, if exists
 char *fetch_if_var(char *token) {
-    char *pre = "$";
+    char pre[2] = "$";
     if (strncmp(pre, token, strlen(pre)) == 0) {
         char *tok_dup = strdup(token);
         char *tok = strtok(tok_dup, pre);
@@ -168,6 +168,7 @@ char *fetch_if_var(char *token) {
         // 1. check env
         char *val;
         if ((val = getenv(tok)) != NULL) {
+            // TO-DO: extra free byte bug?
             free(tok_dup);
             return val;
         }
@@ -227,9 +228,8 @@ char **parse_cmd(size_t argc, char **argv) {
             const size_t nvars = 2;
             size_t ttok_len = 0;
             char *token = strtok(arg_dup, delim);
-            char **tokens = malloc(nvars * sizeof(char*));
+            char **tokens = calloc(nvars, sizeof(char*));
             while (token != NULL) {
-                // TO-DO: test this condition
                 // ignore any extra tokens
                 if (cnt > nvars-1) break;
 
@@ -249,18 +249,23 @@ char **parse_cmd(size_t argc, char **argv) {
                         ttok_len += strlen(var_v);
                     }
                 }
-
                 if (var_v == NULL) {
                     tokens[cnt] = malloc(strlen(token) + 1);
                     strcpy(tokens[cnt], token);
                     ttok_len += strlen(token);
                 }
+
                 cnt++;
                 token = strtok(NULL, delim);
             }
 
-            argv[i] = realloc(argv[i], ttok_len + 1);
-            snprintf(argv[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
+            // 2 extra bytes -> "=" and null byte
+            if (ttok_len != strlen(argv[i])) {
+                char *argptr_cpy = argv[i];
+                if ((argv[i] = realloc(argv[i], ttok_len + 2)) != NULL) {
+                    snprintf(argv[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
+                } else { argv[i] = argptr_cpy; }
+            }
             freev((void*)tokens, nvars, 1);
         }
         free(arg_dup);
@@ -344,19 +349,22 @@ int main(int argc, char *argv[]) {
         printf("wsh> ");
 
         char **tokens = calloc(MIN_TOKEN_LIST_SIZE, sizeof(char*));
-        if (tokens == NULL){
-            fprintf(stderr, "malloc: failed to allocate memory for token list\n");
-            shell_rc = -1;
-            return shell_rc;
-        }
-
         char *line = NULL;
         size_t len = 0;
         ssize_t read;
         size_t ntoks = MIN_TOKEN_LIST_SIZE;
         size_t cnt = 0;
         char delim[2] = " ";
+        int allspace = 1;
         while ((read = getline(&line, &len, stdin)) != -1) {
+            printf("wsh> ");
+
+            // ignore blank lines
+            allspace = 1;
+            if (strcmp("\n", line) == 0) continue;
+            for (ssize_t i = 0; i < read; i++) if (!isspace(line[i])) { allspace = 0; break; }
+            if (allspace == 1) continue;
+
             char *token = strtok(line, delim);
             cnt = 0;
             while (token != NULL) {
@@ -369,27 +377,21 @@ int main(int argc, char *argv[]) {
                     tokens = reallocarray(tokens, ntoks, sizeof(char*));
                 }
                 tokens[cnt] = malloc(strlen(token) + 1);
-                if (tokens[cnt] == NULL) {
-                    fprintf(stderr, "malloc: failed to allocate memory for tokens\n");
-                    free(line);
-                    freev((void*)tokens, ntoks, 1);
-                    free_locals();
-                    free_history();
-                    shell_rc = -1;
-                    return shell_rc;
-                }
-
                 strcpy(tokens[cnt], token);
                 cnt++;
                 token = strtok(NULL, delim);
             }
+
             // exit gracefully if user inputs "exit"
             if (strcmp(tokens[0], EXIT) == 0) {
-                free(line);
-                freev((void*)tokens, ntoks, 1);
-                free_locals();
-                free_history();
-                wsh_exit(cnt, tokens);
+                if (cnt != 1) { shell_rc = -1; continue; }
+                else {
+                    freev((void*)tokens, ntoks, 1);
+                    free(line);
+                    free_locals();
+                    free_history();
+                    exit(shell_rc);
+                }
             }
 
             // 1. log in history (excluding builtins)
@@ -405,8 +407,6 @@ int main(int argc, char *argv[]) {
             }
             // 3. execute
             else { shell_rc = exec_cmd(cnt, parsed_tokens); }
-
-            printf("wsh> ");
         }
         free(line);
         freev((void*)tokens, ntoks, 1);
@@ -421,17 +421,6 @@ int main(int argc, char *argv[]) {
     return shell_rc;
 }
 
-// Usage: exit
-int wsh_exit(size_t argc, char** args) {
-    if (argc != 1) {
-        fprintf(stderr, "Usage: %s\n", args[0]);
-        return -1;
-    }
-    /*freev((void*)args, argc, 1);*/
-    /*free_locals();*/
-    /*free_history();*/
-    exit(shell_rc);
-}
 
 // Usage: cd <dir-path>
 int wsh_cd(size_t argc, char** args) {
@@ -460,7 +449,7 @@ int wsh_export(size_t argc, char** args) {
     char delim[2] = "=";
     char *dup_arg = strdup(args[1]);
     char *token = strtok(dup_arg, delim);
-    char **tokens = malloc(nvars * sizeof(char*));
+    char **tokens = calloc(nvars, sizeof(char*));
     while (token != NULL) {
         tokens[cnt] = malloc(strlen(token) + 1);
         strcpy(tokens[cnt++], token);
@@ -470,6 +459,7 @@ int wsh_export(size_t argc, char** args) {
     // should have atleast 2 tokens for key-val pair
     if (cnt < nvars) {
         fprintf(stderr, "export: key/value pair missing\n");
+        free(dup_arg);
         freev((void*)tokens, nvars, 1);
         return -1;
     }
@@ -497,7 +487,7 @@ int wsh_local(size_t argc, char** args) {
     char delim[2] = "=";
     char *dup_arg = strdup(args[1]);
     char *token = strtok(dup_arg, delim);
-    char **tokens = malloc(nvars * sizeof(char*));
+    char **tokens = calloc(nvars, sizeof(char*));
     while (token != NULL) {
         tokens[cnt] = malloc(strlen(token) + 1);
         strcpy(tokens[cnt++], token);
