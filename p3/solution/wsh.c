@@ -13,14 +13,15 @@
 #define MIN_INPUT_SIZE 16
 #define MIN_TOKEN_LIST_SIZE 5
 #define TOTAL_BUILTINS 7
+#define TOTAL_REDIRECTIONS 5
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
 #define DEFAULT_HISTORY_SIZE 5
 
 
 // shell built-ins
+// (EXIT is handled separately to manage memory)
 static char *builtins[TOTAL_BUILTINS] = {
-    EXIT,
     CD,
     EXPORT,
     LOCAL,
@@ -28,9 +29,7 @@ static char *builtins[TOTAL_BUILTINS] = {
     HISTORY,
     LS
 };
-
 static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
-    &wsh_exit,
     &wsh_cd,
     &wsh_export,
     &wsh_local,
@@ -39,20 +38,26 @@ static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
     &wsh_ls,
 };
 
-// free string/ string lists
+// TO-DO: shell redirections
+/*static char *redirects[TOTAL_REDIRECTIONS] = {*/
+/*    R_IN,*/
+/*    R_OUT,*/
+/*    A_ROUT,*/
+/*    R_ERROUT,*/
+/*    A_RERROUT,*/
+/*};*/
+/*static int (*redirect_fn[TOTAL_REDIRECTIONS])(size_t, char**) = {*/
+/*    &r_input,*/
+/*    &r_output,*/
+/*    &a_routput,*/
+/*    &r_errout,*/
+/*    &a_rerrout,*/
+/*};*/
+
+// free string lists
 void freev(void **ptr, int len, int free_seg) {
-    if (len < 0) {
-        while (*ptr) {
-            free(*ptr);
-            *ptr++ = NULL;
-        }
-    }
-    else {
-        while (len) {
-            free(ptr[len]);
-            ptr[len--] = NULL;
-        }
-    }
+    if (len < 0) while (*ptr) { free(*ptr); *ptr++ = NULL; }
+    else { for (int i = 0; i < len; i++) free(ptr[i]); }
     if (free_seg) free(ptr);
 }
 
@@ -72,7 +77,7 @@ void free_history() {
     hentry *i = hhead;
     hentry *tmp = NULL;
     while (i != NULL) {
-        freev((void*)i->argv, (i->argc)-1, 1);
+        freev((void*)i->argv, (i->argc), 1);
         tmp = i->next;
         free(i);
         i = tmp;
@@ -159,11 +164,13 @@ int shell_rc = 0;
 char *fetch_if_var(char *token) {
     char *pre = "$";
     if (strncmp(pre, token, strlen(pre)) == 0) {
-        char *tok = strtok(token, pre);
+        char *tok_dup = strdup(token);
+        char *tok = strtok(tok_dup, pre);
 
         // 1. check env
         char *val;
         if ((val = getenv(tok)) != NULL) {
+            free(tok_dup);
             return val;
         }
 
@@ -171,10 +178,12 @@ char *fetch_if_var(char *token) {
         localvar *i = lhead;
         while (i != NULL) {
             if (strcmp(tok, i->name) == 0) {
+                free(tok_dup);
                 return i->value;
             }
             i = i->next;
         }
+        free(tok_dup);
     }
     return NULL;
 }
@@ -197,29 +206,34 @@ int exec_in_new_proc(char *cmd, char **args) {
     return 0;
 }
 
+// TO-DO: fix memory leaks
 char **parse_cmd(size_t argc, char **argv) {
     // handle vars, if any
     char *var_v = NULL;
     for (size_t i = 0; i < argc; i++) {
+        char *arg_dup = strdup(argv[i]);
+
         // check for whole variables strings
-        if ((var_v = fetch_if_var(argv[i])) != NULL) {
+        if ((var_v = fetch_if_var(arg_dup)) != NULL) {
             argv[i] = realloc(argv[i], strlen(var_v) + 1);
             strcpy(argv[i], var_v);
+            free(arg_dup);
             continue;
         }
 
         // check for variables in key/value pairs
         char *ptr = NULL;
-        if ((ptr = strchr(argv[i], '=')) != NULL) {
+        if ((ptr = strchr(arg_dup, '=')) != NULL) {
             char delim[2] = "=";
             size_t cnt = 0;
             const size_t nvars = 2;
             size_t ttok_len = 0;
-            char *token = strtok(argv[i], delim);
+            char *token = strtok(arg_dup, delim);
             char **tokens = malloc(nvars * sizeof(char*));
             while (token != NULL) {
                 if (cnt > nvars-1) {
                     fprintf(stderr, "wsh: ignoring extra tokens while parsing key/value pair\n");
+                    free(arg_dup);
                     break;
                 }
 
@@ -228,7 +242,8 @@ char **parse_cmd(size_t argc, char **argv) {
                 if ((ptr = strchr(token, '$')) != NULL) {
                     if (cnt == 0) {
                         fprintf(stderr, "wsh: $ not allowed in variable names\n");
-                        freev((void*)tokens, nvars-1, 1);
+                        free(arg_dup);
+                        freev((void*)tokens, nvars, 1);
                         return NULL;
                     }
 
@@ -250,9 +265,9 @@ char **parse_cmd(size_t argc, char **argv) {
 
             argv[i] = realloc(argv[i], ttok_len + 1);
             snprintf(argv[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
-            freev((void*)tokens, nvars-1, 1);
-            continue;
+            freev((void*)tokens, nvars, 1);
         }
+        free(arg_dup);
     }
     return argv;
 }
@@ -278,25 +293,25 @@ int exec_cmd(size_t argc, char **argv) {
     // 3. check if cmd path can be found in $PATH
     char *path = getenv(PATH);
     if (path != NULL) {
+        char *path_dup = strdup(path);
         char delim[2] = ":";
-        char *token = strtok(path, delim);
+        char *token = strtok(path_dup, delim);
         while (token != NULL) {
             size_t pathlen = 0;
             pathlen = strlen(token) + strlen("/") + strlen(argv[0]) + 1;
             char *fullpath = malloc(pathlen);
             snprintf(fullpath, pathlen, "%s/%s", token, argv[0]);
 
-            // TO-DO
-            // ??? breaks out of loop on a failed access?
-            // ??? PATH keeps getting overwritten
             if (access(fullpath, X_OK) == 0) {
                 int rc =  exec_in_new_proc(fullpath, argv);
+                free(path_dup);
                 free(fullpath);
                 return rc;
             }
             free(fullpath);
             token = strtok(NULL, delim);
         }
+        free(path_dup);
     }
 
     fprintf(stderr, "wsh: invalid command\n");
@@ -332,7 +347,7 @@ int main(int argc, char *argv[]) {
     else if (argc == 1) {
         printf("wsh> ");
 
-        char **tokens = malloc(MIN_TOKEN_LIST_SIZE * sizeof(char*));
+        char **tokens = calloc(MIN_TOKEN_LIST_SIZE, sizeof(char*));
         if (tokens == NULL){
             fprintf(stderr, "malloc: failed to allocate memory for token list\n");
             shell_rc = -1;
@@ -353,16 +368,17 @@ int main(int argc, char *argv[]) {
                 char *ptr = NULL;
                 if ((ptr = strchr(token, '\n'))) *ptr = '\0';
 
-                size_t tokenSize = strlen(token);
                 if (cnt >= ntoks) {
                     ntoks *= 2;
                     tokens = reallocarray(tokens, ntoks, sizeof(char*));
                 }
-                tokens[cnt] = malloc(tokenSize + 1);
+                tokens[cnt] = malloc(strlen(token) + 1);
                 if (tokens[cnt] == NULL) {
                     fprintf(stderr, "malloc: failed to allocate memory for tokens\n");
-                    freev((void*)tokens, ntoks-1, 1);
                     free(line);
+                    freev((void*)tokens, ntoks, 1);
+                    free_locals();
+                    free_history();
                     shell_rc = -1;
                     return shell_rc;
                 }
@@ -370,6 +386,14 @@ int main(int argc, char *argv[]) {
                 strcpy(tokens[cnt], token);
                 cnt++;
                 token = strtok(NULL, delim);
+            }
+            // exit gracefully if user inputs "exit"
+            if (strcmp(tokens[0], EXIT) == 0) {
+                free(line);
+                freev((void*)tokens, ntoks, 1);
+                free_locals();
+                free_history();
+                wsh_exit(cnt, tokens);
             }
 
             // 1. log in history (excluding builtins)
@@ -386,12 +410,10 @@ int main(int argc, char *argv[]) {
             // 3. execute
             else { shell_rc = exec_cmd(cnt, parsed_tokens); }
 
-            // free tokenized elements from list
-            freev((void*)tokens, ntoks-1, 0);
             printf("wsh> ");
         }
-        freev((void*)tokens, ntoks-1, 1);
         free(line);
+        freev((void*)tokens, ntoks, 1);
     }
     else {
         fprintf(stderr, "Usage: %s <script>\n", argv[0]);
@@ -409,10 +431,9 @@ int wsh_exit(size_t argc, char** args) {
         fprintf(stderr, "Usage: %s\n", args[0]);
         return -1;
     }
-    freev((void*)args, argc-1, 1);
-    // TO-DO: possible memory leak ("line" in main loop)
-    free_locals();
-    free_history();
+    /*freev((void*)args, argc, 1);*/
+    /*free_locals();*/
+    /*free_history();*/
     exit(shell_rc);
 }
 
@@ -441,7 +462,8 @@ int wsh_export(size_t argc, char** args) {
     size_t cnt = 0;
     const size_t nvars = 2;
     char delim[2] = "=";
-    char *token = strtok(args[1], delim);
+    char *dup_arg = strdup(args[1]);
+    char *token = strtok(dup_arg, delim);
     char **tokens = malloc(nvars * sizeof(char*));
     while (token != NULL) {
         tokens[cnt] = malloc(strlen(token) + 1);
@@ -452,7 +474,7 @@ int wsh_export(size_t argc, char** args) {
     // should have atleast 2 tokens for key-val pair
     if (cnt < nvars) {
         fprintf(stderr, "export: key/value pair missing\n");
-        freev((void*)tokens, nvars-1, 1);
+        freev((void*)tokens, nvars, 1);
         return -1;
     }
 
@@ -461,7 +483,8 @@ int wsh_export(size_t argc, char** args) {
         fprintf(stderr, "export: failed to setenv\n");
         rc = -1;
     }
-    freev((void*)tokens, nvars-1, 1);
+    free(dup_arg);
+    freev((void*)tokens, nvars, 1);
     return rc;
 }
 
@@ -476,7 +499,8 @@ int wsh_local(size_t argc, char** args) {
     size_t cnt = 0;
     const size_t nvars = 2;
     char delim[2] = "=";
-    char *token = strtok(args[1], delim);
+    char *dup_arg = strdup(args[1]);
+    char *token = strtok(dup_arg, delim);
     char **tokens = malloc(nvars * sizeof(char*));
     while (token != NULL) {
         tokens[cnt] = malloc(strlen(token) + 1);
@@ -506,7 +530,9 @@ int wsh_local(size_t argc, char** args) {
         newvar->idx = lhead->idx+1;
     }
     lhead = newvar;
-    freev((void*)tokens, nvars-1, 1);
+
+    free(dup_arg);
+    freev((void*)tokens, nvars, 1);
     return 0;
 }
 
@@ -561,7 +587,6 @@ int wsh_history(size_t argc, char** args) {
             hentry *curr = hhead;
             while (curr != NULL) {
                 if ((size_t)val == (histentries - curr->idx)) {
-                    // TO-DO: see if parse_cmd can modify list in-place (possible memory leak)
                     char **parsed_tokens;
                     if ((parsed_tokens = parse_cmd(curr->argc, curr->argv)) == NULL) return -1;
                     return exec_cmd(curr->argc, parsed_tokens);
@@ -598,7 +623,7 @@ int wsh_history(size_t argc, char** args) {
 
                 // free discarded entries
                 if (cnt > histsize - 1) {
-                    freev((void*)curr->argv, (curr->argc)-1, 1);
+                    freev((void*)curr->argv, (curr->argc), 1);
                     tmp = curr->next;
                     curr->next = NULL;
                     free(curr);

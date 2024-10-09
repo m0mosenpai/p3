@@ -16,4 +16,15 @@ int wsh_history(size_t argc, char** args);
 int wsh_ls(size_t argc, char** args);
 
 
-#define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+// redirection tokens
+#define R_IN      "<"
+#define R_OUT     ">"
+#define A_ROUT    "<<"
+#define R_ERROUT  "&>"
+#define A_RERROUT "&>>"
+
+int r_input(size_t argc, char** args);
+int r_output(size_t argc, char** args);
+int a_routput(size_t argc, char** args);
+int r_errout(size_t argc, char** args);
+int a_rerrout(size_t argc, char** args);
