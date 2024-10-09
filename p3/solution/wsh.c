@@ -189,6 +189,7 @@ char *fetch_if_var(char *token) {
 }
 
 
+// TO-DO: fix "syscall points to unaddressable byte(s)"
 int exec_in_new_proc(char *cmd, char **args) {
     pid_t child_pid, wpid;
     int status;
@@ -206,7 +207,6 @@ int exec_in_new_proc(char *cmd, char **args) {
     return 0;
 }
 
-// TO-DO: fix memory leaks
 char **parse_cmd(size_t argc, char **argv) {
     // handle vars, if any
     char *var_v = NULL;
@@ -530,10 +530,12 @@ int wsh_local(size_t argc, char** args) {
 }
 
 // Usage: vars
+// TO-DO: no "wsh> " after output
 int wsh_vars(size_t argc, char** args) {
     if (argc != 1 || args == NULL) return -1;
 
     localvar *i = lhead;
+    printf("\n");
     while (i != NULL) {
         printf("%s=%s\n", i->name, i->value);
         i = i->next;
@@ -548,8 +550,10 @@ int wsh_history(size_t argc, char** args) {
     if (argc > 3) return -1;
 
     // print history
+    // TO-DO: no "wsh> " after output
     if (argc == 1 && args[0] != NULL) {
         hentry *curr = hhead;
+        printf("\n");
         while (curr != NULL) {
             printf("%zu) ", (histentries - curr->idx));
             for (size_t i = 0; i < curr->argc; i++) {
@@ -581,6 +585,7 @@ int wsh_history(size_t argc, char** args) {
             while (curr != NULL) {
                 if ((size_t)val == (histentries - curr->idx)) {
                     char **parsed_tokens;
+                    // TO-DO: Memory Leak
                     if ((parsed_tokens = parse_cmd(curr->argc, curr->argv)) == NULL) return -1;
                     return exec_cmd(curr->argc, parsed_tokens);
                 }
