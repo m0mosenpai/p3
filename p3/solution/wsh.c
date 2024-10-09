@@ -63,7 +63,6 @@ void freev(void **ptr, int len, int free_seg) {
 }
 
 // command history
-// TO-DO: History bug - check the last executed cmd instead of last history cmd
 typedef struct hentry {
     size_t idx;
     size_t argc;
@@ -85,7 +84,8 @@ void free_history() {
     }
 }
 
-void log_cmd(size_t argc, char **argv) {
+
+void log_in_history(size_t argc, char **argv) {
     if (histentries < histsize) {
         if (hhead == NULL) {
             hentry *newentry = malloc(sizeof(hentry));
@@ -106,16 +106,17 @@ void log_cmd(size_t argc, char **argv) {
             if (hhead->argc == argc) {
                 for (size_t i = 0; i < argc; i++) {
                     if (hhead->argv[i] == NULL && argv[i] == NULL) continue;
-                    if (hhead->argv[i] == NULL || argv[i] == NULL) { is_repeated = 0; break; }
+                    if (hhead->argv[i] == NULL || argv[i] == NULL) {
+                        is_repeated = 0;
+                        break;
+                    }
                     if (strcmp(hhead->argv[i], argv[i]) != 0) {
                         is_repeated = 0;
                         break;
                     }
                 }
             }
-            else {
-                is_repeated = 0;
-            }
+            else { is_repeated = 0; }
 
             if (!is_repeated) {
                 hentry *newentry = malloc(sizeof(hentry));
@@ -209,24 +210,24 @@ int exec_in_new_proc(char *cmd, char **args) {
 char **parse_cmd(size_t argc, char **argv) {
     // handle vars, if any
     char *var_v = NULL;
+    char **argv_parsed = calloc(argc, sizeof(char*));
     for (size_t i = 0; i < argc; i++) {
-        char *arg_dup = strdup(argv[i]);
 
         // check for whole variables strings
-        if ((var_v = fetch_if_var(arg_dup)) != NULL) {
-            argv[i] = realloc(argv[i], strlen(var_v) + 1);
-            strcpy(argv[i], var_v);
-            free(arg_dup);
+        if ((var_v = fetch_if_var(argv[i])) != NULL) {
+            argv_parsed[i] = malloc(strlen(var_v) + 1);
+            strcpy(argv_parsed[i], var_v);
             continue;
         }
 
         // check for variables in key/value pairs
         char *ptr = NULL;
-        if ((ptr = strchr(arg_dup, '=')) != NULL) {
+        if ((ptr = strchr(argv[i], '=')) != NULL) {
             char delim[2] = "=";
             size_t cnt = 0;
             const size_t nvars = 2;
             size_t ttok_len = 0;
+            char *arg_dup = strdup(argv[i]);
             char *token = strtok(arg_dup, delim);
             char **tokens = calloc(nvars, sizeof(char*));
             while (token != NULL) {
@@ -239,6 +240,7 @@ char **parse_cmd(size_t argc, char **argv) {
                     if (cnt == 0) {
                         fprintf(stderr, "wsh: $ not allowed in variable names\n");
                         free(arg_dup);
+                        freev((void*)argv_parsed, argc, 1);
                         freev((void*)tokens, nvars, 1);
                         return NULL;
                     }
@@ -258,19 +260,20 @@ char **parse_cmd(size_t argc, char **argv) {
                 cnt++;
                 token = strtok(NULL, delim);
             }
+            free(arg_dup);
+
 
             // 2 extra bytes -> "=" and null byte
-            if (ttok_len != strlen(argv[i])) {
-                char *argptr_cpy = argv[i];
-                if ((argv[i] = realloc(argv[i], ttok_len + 2)) != NULL) {
-                    snprintf(argv[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
-                } else { argv[i] = argptr_cpy; }
-            }
+            argv_parsed[i] = malloc(ttok_len + 2);
+            snprintf(argv_parsed[i], ttok_len + 2, "%s=%s", tokens[0], tokens[1]);
             freev((void*)tokens, nvars, 1);
+            continue;
         }
-        free(arg_dup);
+
+        argv_parsed[i] = malloc(strlen(argv[i]) + 1);
+        strcpy(argv_parsed[i], argv[i]);
     }
-    return argv;
+    return argv_parsed;
 }
 
 int exec_cmd(size_t argc, char **argv) {
@@ -348,7 +351,6 @@ int main(int argc, char *argv[]) {
     else if (argc == 1) {
         printf("wsh> ");
 
-        char **tokens = calloc(MIN_TOKEN_LIST_SIZE, sizeof(char*));
         char *line = NULL;
         size_t len = 0;
         ssize_t read;
@@ -365,8 +367,10 @@ int main(int argc, char *argv[]) {
             for (ssize_t i = 0; i < read; i++) if (!isspace(line[i])) { allspace = 0; break; }
             if (allspace == 1) continue;
 
-            char *token = strtok(line, delim);
             cnt = 0;
+            ntoks = MIN_TOKEN_LIST_SIZE;
+            char **tokens = calloc(ntoks, sizeof(char*));
+            char *token = strtok(line, delim);
             while (token != NULL) {
                 // strip newline char
                 char *ptr = NULL;
@@ -398,7 +402,7 @@ int main(int argc, char *argv[]) {
             int isbuiltin = 0;
             for (size_t i = 0; i < TOTAL_BUILTINS; i++)
                 if (strcmp(tokens[0], builtins[i]) == 0) { isbuiltin = 1; break; }
-            if (!isbuiltin) log_cmd(cnt, tokens);
+            if (!isbuiltin) log_in_history(cnt, tokens);
 
             // 2. parse
             char **parsed_tokens;
@@ -406,10 +410,13 @@ int main(int argc, char *argv[]) {
                 shell_rc = -1;
             }
             // 3. execute
-            else { shell_rc = exec_cmd(cnt, parsed_tokens); }
+            else {
+                shell_rc = exec_cmd(cnt, parsed_tokens);
+                freev((void*)parsed_tokens, cnt, 1);
+            }
+            freev((void*)tokens, ntoks, 1);
         }
         free(line);
-        freev((void*)tokens, ntoks, 1);
     }
     else {
         fprintf(stderr, "Usage: %s <script>\n", argv[0]);
