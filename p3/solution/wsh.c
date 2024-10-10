@@ -227,7 +227,6 @@ char **parse_cmd(size_t argc, char **argv) {
     char **argv_parsed = calloc(argc + 1, sizeof(char*));
     size_t i = 0;
     for (i = 0; i < argc; i++) {
-
         // check for whole variables strings
         if ((var_v = fetch_if_var(argv[i])) != NULL) {
             argv_parsed[i] = malloc(strlen(var_v) + 1);
@@ -334,9 +333,12 @@ int exec_cmd(size_t argc, char **argv) {
 }
 
 // generate prompt
-int prompt(void) {
-    int rc = printf("wsh> ");
-    fflush(stdout);
+int prompt(FILE *stream) {
+    int rc = 1;
+    if (stream == stdin) {
+        rc = printf("wsh> ");
+        fflush(stdout);
+    }
     return rc;
 }
 
@@ -347,94 +349,93 @@ int main(int argc, char *argv[]) {
         return shell_rc;
     }
 
-    // TO-DO: batch mode
-    if (argc == 2) {
+    FILE *instream = NULL;
+    if (argc == 1) instream = stdin;
+    else if (argc == 2) {
         const char *scriptFile = argv[1];
-        FILE *script = fopen(scriptFile, "r");
-        if (script == NULL) {
+        instream = fopen(scriptFile, "r");
+        if (instream == NULL) {
             shell_rc = -1;
             return shell_rc;
         }
-
-        /*char *line = NULL;*/
-        /*size_t len = 0;*/
-        /*ssize_t read;*/
-        /*while ((read = getline(&line, &len, script)) != -1) {*/
-        /*    // read and execute commands in file  */
-        /*}*/
     }
-    // interactive mode
-    else if (argc == 1) {
-        char *line = NULL;
-        size_t len = 0;
-        ssize_t read;
-        size_t ntoks = MIN_TOKEN_LIST_SIZE;
-        size_t cnt = 0;
-        char delim[2] = " ";
-        int allspace = 1;
-        while (prompt() && (read = getline(&line, &len, stdin)) != -1) {
+    else {
+        shell_rc = -1;
+        return shell_rc;
+    }
 
-            // ignore blank lines
-            allspace = 1;
-            if (strcmp("\n", line) == 0) continue;
-            for (ssize_t i = 0; i < read; i++) if (!isspace(line[i])) { allspace = 0; break; }
-            if (allspace == 1) continue;
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    size_t ntoks = MIN_TOKEN_LIST_SIZE;
+    size_t cnt = 0;
+    char delim[2] = " ";
+    int allspace = 1;
+    while (prompt(instream) && (read = getline(&line, &len, instream)) != -1) {
 
-            cnt = 0;
-            ntoks = MIN_TOKEN_LIST_SIZE;
-            char **tokens = calloc(ntoks, sizeof(char*));
-            char *token = strtok(line, delim);
-            while (token != NULL) {
-                // strip newline char
-                char *ptr = NULL;
-                if ((ptr = strchr(token, '\n'))) *ptr = '\0';
+        // ignore blank lines
+        allspace = 1;
+        if (strcmp("\n", line) == 0) continue;
+        for (size_t i = 0; i < strlen(line); i++) if (!isspace(line[i])) { allspace = 0; break; }
+        if (allspace == 1) continue;
 
-                if (cnt >= ntoks) {
-                    ntoks *= 2;
-                    tokens = reallocarray(tokens, ntoks, sizeof(char*));
-                }
-                tokens[cnt] = malloc(strlen(token) + 1);
-                strcpy(tokens[cnt], token);
-                cnt++;
-                token = strtok(NULL, delim);
+        // ignore comments
+        char com[2] = "#";
+        if (strncmp(line, com, strlen(com)) == 0) continue;
+
+        cnt = 0;
+        ntoks = MIN_TOKEN_LIST_SIZE;
+        char **tokens = calloc(ntoks, sizeof(char*));
+        char *token = strtok(line, delim);
+        while (token != NULL) {
+            // strip newline char
+            char *ptr = NULL;
+            if ((ptr = strchr(token, '\n'))) *ptr = '\0';
+
+            if (cnt >= ntoks) {
+                ntoks *= 2;
+                tokens = reallocarray(tokens, ntoks, sizeof(char*));
             }
-
-            // exit gracefully if user inputs "exit"
-            if (strcmp(tokens[0], EXIT) == 0) {
-                if (cnt != 1) { shell_rc = -1; continue; }
-                else {
-                    freev((void*)tokens, ntoks, 1);
-                    free(line);
-                    free_locals();
-                    free_history(hhead);
-                    exit(shell_rc);
-                }
-            }
-
-            // 1. log in history (excluding builtins)
-            int isbuiltin = 0;
-            for (size_t i = 0; i < TOTAL_BUILTINS; i++)
-                if (strcmp(tokens[0], builtins[i]) == 0) { isbuiltin = 1; break; }
-            if (!isbuiltin) log_in_history(cnt, tokens);
-
-            // 2. parse
-            char **parsed_tokens;
-            if ((parsed_tokens = parse_cmd(cnt, tokens)) == NULL) {
-                shell_rc = -1;
-            }
-            // 3. execute
-            else {
-                shell_rc = exec_cmd(cnt, parsed_tokens);
-                freev((void*)parsed_tokens, cnt, 1);
-            }
-            freev((void*)tokens, ntoks, 1);
+            tokens[cnt] = malloc(strlen(token) + 1);
+            strcpy(tokens[cnt], token);
+            cnt++;
+            token = strtok(NULL, delim);
         }
-        free(line);
+
+        // exit gracefully if user inputs "exit"
+        if (strcmp(tokens[0], EXIT) == 0) {
+            if (cnt != 1) { shell_rc = -1; continue; }
+            else {
+                freev((void*)tokens, ntoks, 1);
+                free(line);
+                free_locals();
+                free_history(hhead);
+                exit(shell_rc);
+            }
+        }
+
+        // 1. log in history (excluding builtins)
+        int isbuiltin = 0;
+        for (size_t i = 0; i < TOTAL_BUILTINS; i++)
+            if (strcmp(tokens[0], builtins[i]) == 0) { isbuiltin = 1; break; }
+        if (!isbuiltin) log_in_history(cnt, tokens);
+
+        // 2. parse
+        char **parsed_tokens;
+        if ((parsed_tokens = parse_cmd(cnt, tokens)) == NULL) {
+            shell_rc = -1;
+        }
+        // 3. execute
+        else {
+            shell_rc = exec_cmd(cnt, parsed_tokens);
+            freev((void*)parsed_tokens, cnt, 1);
+        }
+        freev((void*)tokens, ntoks, 1);
     }
-    else { shell_rc = -1; }
-    
+    fclose(instream);
+    free(line);
     free_locals();
-    free_history(hhead);
+    if (histsize != 0) free_history(hhead);
     return shell_rc;
 }
 
@@ -480,7 +481,6 @@ int wsh_export(size_t argc, char** args) {
 
 // Usage: local <name>=<val>
 //        local <name>=$VAR
-// TO-DO: store opposite to history
 int wsh_local(size_t argc, char** args) {
     if (argc != 2 || args == NULL) return -1;
 
@@ -550,7 +550,7 @@ int wsh_history(size_t argc, char** args) {
     if (argc > 3) return -1;
 
     // print history
-    if (argc == 1 && args[0] != NULL) {
+    if (argc == 1 && args[0] != NULL && histentries > 0) {
         hentry *curr = hhead;
         while (curr != NULL) {
             printf("%zu) ", (histentries - curr->idx));
@@ -575,9 +575,10 @@ int wsh_history(size_t argc, char** args) {
             while (curr != NULL) {
                 if ((size_t)val == (histentries - curr->idx)) {
                     char **parsed_tokens;
-                    // TO-DO: Memory Leak
                     if ((parsed_tokens = parse_cmd(curr->argc, curr->argv)) == NULL) return -1;
-                    return exec_cmd(curr->argc, parsed_tokens);
+                    int rc = exec_cmd(curr->argc, parsed_tokens);
+                    freev((void*)parsed_tokens, curr->argc, 1);
+                    return rc;
                 }
                 curr = curr->next;
             }
