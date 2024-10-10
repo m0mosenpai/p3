@@ -73,8 +73,7 @@ hentry *hhead = NULL;
 size_t histsize = DEFAULT_HISTORY_SIZE;
 size_t histentries = 0;
 
-void free_history() {
-    hentry *i = hhead;
+void free_history(hentry *i) {
     hentry *tmp = NULL;
     while (i != NULL) {
         freev((void*)i->argv, (i->argc), 1);
@@ -84,10 +83,39 @@ void free_history() {
     }
 }
 
-
 void log_in_history(size_t argc, char **argv) {
-    if (histentries < histsize) {
-        if (hhead == NULL) {
+    if (hhead == NULL) {
+        hentry *newentry = malloc(sizeof(hentry));
+        newentry->argc = argc;
+        newentry->argv = malloc(argc * sizeof(char*));
+        for (size_t i = 0; i < argc; i++) {
+            newentry->argv[i] = malloc(strlen(argv[i]) + 1);
+            strcpy(newentry->argv[i], argv[i]);
+        }
+        newentry->idx = 0;
+        newentry->next = NULL;
+        hhead = newentry;
+        histentries++;
+    }
+    else {
+        // check for consecutively repeating commands
+        int is_repeated = 1;
+        if (hhead->argc == argc) {
+            for (size_t i = 0; i < argc; i++) {
+                if (hhead->argv[i] == NULL && argv[i] == NULL) continue;
+                if (hhead->argv[i] == NULL || argv[i] == NULL) {
+                    is_repeated = 0;
+                    break;
+                }
+                if (strcmp(hhead->argv[i], argv[i]) != 0) {
+                    is_repeated = 0;
+                    break;
+                }
+            }
+        }
+        else { is_repeated = 0; }
+
+        if (!is_repeated) {
             hentry *newentry = malloc(sizeof(hentry));
             newentry->argc = argc;
             newentry->argv = malloc(argc * sizeof(char*));
@@ -95,40 +123,28 @@ void log_in_history(size_t argc, char **argv) {
                 newentry->argv[i] = malloc(strlen(argv[i]) + 1);
                 strcpy(newentry->argv[i], argv[i]);
             }
-            newentry->idx = 0;
-            newentry->next = NULL;
+            newentry->next = hhead;
+            newentry->idx = hhead->idx + 1;
             hhead = newentry;
-            histentries++;
-        }
-        else {
-            // check for consecutively repeating commands
-            int is_repeated = 1;
-            if (hhead->argc == argc) {
-                for (size_t i = 0; i < argc; i++) {
-                    if (hhead->argv[i] == NULL && argv[i] == NULL) continue;
-                    if (hhead->argv[i] == NULL || argv[i] == NULL) {
-                        is_repeated = 0;
-                        break;
-                    }
-                    if (strcmp(hhead->argv[i], argv[i]) != 0) {
-                        is_repeated = 0;
-                        break;
-                    }
-                }
-            }
-            else { is_repeated = 0; }
 
-            if (!is_repeated) {
-                hentry *newentry = malloc(sizeof(hentry));
-                newentry->argc = argc;
-                newentry->argv = malloc(argc * sizeof(char*));
-                for (size_t i = 0; i < argc; i++) {
-                    newentry->argv[i] = malloc(strlen(argv[i]) + 1);
-                    strcpy(newentry->argv[i], argv[i]);
+            // drop last element if max size reached
+            if (histentries == histsize) {
+                hentry *curr = hhead;
+                hentry *tmp = NULL;
+                size_t cnt = 0;
+                while (curr != NULL) {
+                    curr->idx = histentries - cnt - 1;
+                    if (cnt == histsize - 1) {
+                        tmp = curr->next;
+                        curr->next = NULL;
+                        curr = tmp;
+                        free_history(curr);
+                        break;
+                    }
+                    curr = curr->next;
+                    cnt++;
                 }
-                newentry->next = hhead;
-                newentry->idx = hhead->idx+1;
-                hhead = newentry;
+            } else {
                 histentries++;
             }
         }
@@ -188,8 +204,6 @@ char *fetch_if_var(char *token) {
     return NULL;
 }
 
-
-// TO-DO: fix "syscall points to unaddressable byte(s)"
 int exec_in_new_proc(char *cmd, char **args) {
     pid_t child_pid, wpid;
     int status;
@@ -210,8 +224,9 @@ int exec_in_new_proc(char *cmd, char **args) {
 char **parse_cmd(size_t argc, char **argv) {
     // handle vars, if any
     char *var_v = NULL;
-    char **argv_parsed = calloc(argc, sizeof(char*));
-    for (size_t i = 0; i < argc; i++) {
+    char **argv_parsed = calloc(argc + 1, sizeof(char*));
+    size_t i = 0;
+    for (i = 0; i < argc; i++) {
 
         // check for whole variables strings
         if ((var_v = fetch_if_var(argv[i])) != NULL) {
@@ -238,7 +253,6 @@ char **parse_cmd(size_t argc, char **argv) {
                 var_v = NULL;
                 if ((ptr = strchr(token, '$')) != NULL) {
                     if (cnt == 0) {
-                        fprintf(stderr, "wsh: $ not allowed in variable names\n");
                         free(arg_dup);
                         freev((void*)argv_parsed, argc, 1);
                         freev((void*)tokens, nvars, 1);
@@ -273,14 +287,12 @@ char **parse_cmd(size_t argc, char **argv) {
         argv_parsed[i] = malloc(strlen(argv[i]) + 1);
         strcpy(argv_parsed[i], argv[i]);
     }
+    argv_parsed[i] = NULL;
     return argv_parsed;
 }
 
 int exec_cmd(size_t argc, char **argv) {
-    if (argc == 0 || argv == NULL) {
-        fprintf(stderr, "wsh: cmd can't be empty!\n");
-        return -1;
-    }
+    if (argc == 0 || argv == NULL) return -1;
 
     // 1. check if cmd is built-in
     for (size_t i = 0; i < TOTAL_BUILTINS; i++) {
@@ -318,14 +330,19 @@ int exec_cmd(size_t argc, char **argv) {
         free(path_dup);
     }
 
-    fprintf(stderr, "wsh: invalid command\n");
     return -1;
+}
+
+// generate prompt
+int prompt(void) {
+    int rc = printf("wsh> ");
+    fflush(stdout);
+    return rc;
 }
 
 int main(int argc, char *argv[]) {
     // intialize default PATH
     if (setenv(PATH, DEFAULT_PATH, 1) != 0) {
-        fprintf(stderr, "setenv: failed to initialize PATH\n");
         shell_rc = -1;
         return shell_rc;
     }
@@ -335,7 +352,6 @@ int main(int argc, char *argv[]) {
         const char *scriptFile = argv[1];
         FILE *script = fopen(scriptFile, "r");
         if (script == NULL) {
-            fprintf(stderr, "fopen: script file not found!\n");
             shell_rc = -1;
             return shell_rc;
         }
@@ -349,8 +365,6 @@ int main(int argc, char *argv[]) {
     }
     // interactive mode
     else if (argc == 1) {
-        printf("wsh> ");
-
         char *line = NULL;
         size_t len = 0;
         ssize_t read;
@@ -358,8 +372,7 @@ int main(int argc, char *argv[]) {
         size_t cnt = 0;
         char delim[2] = " ";
         int allspace = 1;
-        while ((read = getline(&line, &len, stdin)) != -1) {
-            printf("wsh> ");
+        while (prompt() && (read = getline(&line, &len, stdin)) != -1) {
 
             // ignore blank lines
             allspace = 1;
@@ -393,7 +406,7 @@ int main(int argc, char *argv[]) {
                     freev((void*)tokens, ntoks, 1);
                     free(line);
                     free_locals();
-                    free_history();
+                    free_history(hhead);
                     exit(shell_rc);
                 }
             }
@@ -418,38 +431,26 @@ int main(int argc, char *argv[]) {
         }
         free(line);
     }
-    else {
-        fprintf(stderr, "Usage: %s <script>\n", argv[0]);
-        shell_rc = -1;
-    }
+    else { shell_rc = -1; }
     
     free_locals();
-    free_history();
+    free_history(hhead);
     return shell_rc;
 }
 
 
 // Usage: cd <dir-path>
 int wsh_cd(size_t argc, char** args) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <dir>\n", args[0]);
-        return -1;
-    }
+    if (argc != 2) return -1;
     char *var_v = fetch_if_var(args[1]);
-    if (chdir(var_v == NULL ? args[1] : var_v) != 0) {
-        fprintf(stderr, "chdir: failed to cd\n");
-        return -1;
-    }
+    if (chdir(var_v == NULL ? args[1] : var_v) != 0) return -1;
     return 0;
 }
 
 // Usage: export <name>=<val>
 //        export <name>=$VAR
 int wsh_export(size_t argc, char** args) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <var>=<val>\n", args[0]);
-        return -1;
-    }
+    if (argc != 2) return -1;
 
     size_t cnt = 0;
     const size_t nvars = 2;
@@ -465,17 +466,13 @@ int wsh_export(size_t argc, char** args) {
 
     // should have atleast 2 tokens for key-val pair
     if (cnt < nvars) {
-        fprintf(stderr, "export: key/value pair missing\n");
         free(dup_arg);
         freev((void*)tokens, nvars, 1);
         return -1;
     }
 
     int rc = 0;
-    if ((rc = setenv(tokens[0], tokens[1], 1)) != 0) {
-        fprintf(stderr, "export: failed to setenv\n");
-        rc = -1;
-    }
+    if ((rc = setenv(tokens[0], tokens[1], 1)) != 0) rc = -1;
     free(dup_arg);
     freev((void*)tokens, nvars, 1);
     return rc;
@@ -483,11 +480,9 @@ int wsh_export(size_t argc, char** args) {
 
 // Usage: local <name>=<val>
 //        local <name>=$VAR
+// TO-DO: store opposite to history
 int wsh_local(size_t argc, char** args) {
-    if (argc != 2 || args == NULL) {
-        fprintf(stderr, "Usage: %s <var>=<val>\n", args[0]);
-        return -1;
-    }
+    if (argc != 2 || args == NULL) return -1;
 
     size_t cnt = 0;
     const size_t nvars = 2;
@@ -499,6 +494,13 @@ int wsh_local(size_t argc, char** args) {
         tokens[cnt] = malloc(strlen(token) + 1);
         strcpy(tokens[cnt++], token);
         token = strtok(NULL, delim);
+    }
+
+    // should have atleast 2 tokens for key-val pair
+    if (cnt < nvars) {
+        free(dup_arg);
+        freev((void*)tokens, nvars, 1);
+        return -1;
     }
 
     localvar *newvar = malloc(sizeof(localvar));
@@ -516,13 +518,13 @@ int wsh_local(size_t argc, char** args) {
 
     if (lhead == NULL) {
         newvar->idx = 0;
-        newvar->next = NULL;
+        lhead = newvar;
     }
     else {
-        newvar->next = lhead;
+        lhead->next = newvar;
         newvar->idx = lhead->idx+1;
     }
-    lhead = newvar;
+    newvar->next = NULL;
 
     free(dup_arg);
     freev((void*)tokens, nvars, 1);
@@ -530,12 +532,10 @@ int wsh_local(size_t argc, char** args) {
 }
 
 // Usage: vars
-// TO-DO: no "wsh> " after output
 int wsh_vars(size_t argc, char** args) {
     if (argc != 1 || args == NULL) return -1;
 
     localvar *i = lhead;
-    printf("\n");
     while (i != NULL) {
         printf("%s=%s\n", i->name, i->value);
         i = i->next;
@@ -550,10 +550,8 @@ int wsh_history(size_t argc, char** args) {
     if (argc > 3) return -1;
 
     // print history
-    // TO-DO: no "wsh> " after output
     if (argc == 1 && args[0] != NULL) {
         hentry *curr = hhead;
-        printf("\n");
         while (curr != NULL) {
             printf("%zu) ", (histentries - curr->idx));
             for (size_t i = 0; i < curr->argc; i++) {
@@ -570,15 +568,7 @@ int wsh_history(size_t argc, char** args) {
         errno = 0;
         char *endptr;
         long val = strtol(args[1], &endptr, 10);
-        if (errno == ERANGE || *endptr != '\0') {
-            fprintf(stderr, "history: n is not a valid numeric value\n");
-            return -1;
-        }
-
-        if (val < 0) {
-            fprintf(stderr, "history: n should be positive\n");
-            return -1;
-        }
+        if (errno == ERANGE || *endptr != '\0' || val < 0) return -1;
 
         if ((size_t)val <= histentries && (size_t)val <= histsize) {
             hentry *curr = hhead;
@@ -598,69 +588,49 @@ int wsh_history(size_t argc, char** args) {
         errno = 0;
         char *endptr;
         long val = strtol(args[2], &endptr, 10);
-        if (errno == ERANGE || *endptr != '\0') {
-            fprintf(stderr, "history: n is not a valid numeric value\n");
-            return -1;
+        if (errno == ERANGE || *endptr != '\0' || val < 0) return -1;
+        histsize = (size_t)val;
+        // TO-DO: head not clearing
+        if (histsize == 0) {
+            histentries = 0;
+            free_history(hhead);
+            return 0;
         }
 
-        if (val < 0) {
-            fprintf(stderr, "history: n should be positive\n");
-            return -1;
-        }
-        histsize = (size_t)val;
         // drop extra entries
-        // TO-DO: logic can be moved into free_history()
         if (histsize < histentries) {
             size_t cnt = 0;
             hentry *curr = hhead;
             hentry *tmp = NULL;
             while (curr != NULL) {
                 // remap index values according to new size
-                // TO-DO: overflowing?
                 curr->idx = histsize - cnt - 1;
 
-                // free discarded entries
-                if (cnt > histsize - 1) {
-                    freev((void*)curr->argv, (curr->argc), 1);
-                    tmp = curr->next;
-                    curr->next = NULL;
-                    free(curr);
-                    curr = tmp;
-                }
-
-                // disconnect at new size
+                // disconnect and free discarded entries
                 if (cnt == histsize - 1) {
                     tmp = curr->next;
                     curr->next = NULL;
                     curr = tmp;
+                    free_history(curr);
+                    break;
                 }
-                // TO-DO: causes SEGV on reducing history from 2 digit -> 1 digit sizes
                 else { curr = curr->next; }
                 cnt++;
             }
             histentries = histsize;
         }
     }
-    else {
-        fprintf(stderr, "Usage: %s | %s <n> | %s set <n>\n", args[0], args[0], args[0]);
-        return -1;
-    }
+    else { return -1;}
     return 0;
 }
 
 
 // Usage: ls
 int wsh_ls(size_t argc, char** args) {
-    if (argc != 1 || args == NULL) {
-        fprintf(stderr, "Usage: %s\n", args[0]);
-        return -1;
-    }
+    if (argc != 1 || args == NULL) return -1;
 
     char path[PATH_MAX];
-    if (getcwd(path, sizeof(path)) == NULL) {
-        fprintf(stderr, "ls: failed to getcwd\n");
-        return -1;
-    }
+    if (getcwd(path, sizeof(path)) == NULL) return -1;
 
     struct dirent **names;
     int n;
