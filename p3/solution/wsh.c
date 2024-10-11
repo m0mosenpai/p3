@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include "wsh.h"
 
 #define MIN_INPUT_SIZE 16
@@ -18,7 +19,6 @@
 #define PATH "PATH"
 #define DEFAULT_PATH "/bin"
 #define DEFAULT_HISTORY_SIZE 5
-
 
 // shell built-ins
 // (EXIT is handled separately to manage memory)
@@ -39,21 +39,20 @@ static int (*builtin_fn[TOTAL_BUILTINS])(size_t, char**) = {
     &wsh_ls,
 };
 
-// TO-DO: shell redirections
-/*static char *redirects[TOTAL_REDIRECTIONS] = {*/
-/*    R_IN,*/
-/*    R_OUT,*/
-/*    A_ROUT,*/
-/*    R_ERROUT,*/
-/*    A_RERROUT,*/
-/*};*/
-/*static int (*redirect_fn[TOTAL_REDIRECTIONS])(size_t, char**) = {*/
-/*    &r_input,*/
-/*    &r_output,*/
-/*    &a_routput,*/
-/*    &r_errout,*/
-/*    &a_rerrout,*/
-/*};*/
+static char *redirects[TOTAL_REDIRECTIONS] = {
+    A_RERROUT,
+    R_ERROUT,
+    A_ROUT,
+    R_OUT,
+    R_IN,
+};
+static int (*redirect_fn[TOTAL_REDIRECTIONS])(char*, int) = {
+    &a_rerrout,
+    &r_errout,
+    &a_routput,
+    &r_output,
+    &r_input,
+};
 
 // free string lists
 void freev(void **ptr, int len, int free_seg) {
@@ -222,7 +221,6 @@ int exec_in_new_proc(char *cmd, char **args) {
 }
 
 char **parse_cmd(size_t argc, char **argv) {
-    // handle vars, if any
     char *var_v = NULL;
     char **argv_parsed = calloc(argc + 1, sizeof(char*));
     size_t i = 0;
@@ -296,7 +294,8 @@ int exec_cmd(size_t argc, char **argv) {
     // 1. check if cmd is built-in
     for (size_t i = 0; i < TOTAL_BUILTINS; i++) {
         if (strcmp(argv[0], builtins[i]) == 0) {
-            return ((*builtin_fn[i])(argc, argv));
+            int rc = ((*builtin_fn[i])(argc, argv));
+            return rc;
         }
     }
 
@@ -349,7 +348,12 @@ int main(int argc, char *argv[]) {
         return shell_rc;
     }
 
+    // intialize file descriptor values
+    int old_stdout = 0;
+    int old_stdin = 0;
+    int old_stderr = 0;
     FILE *instream = NULL;
+
     if (argc == 1) instream = stdin;
     else if (argc == 2) {
         const char *scriptFile = argv[1];
@@ -372,7 +376,6 @@ int main(int argc, char *argv[]) {
     char delim[2] = " ";
     int allspace = 1;
     while (prompt(instream) && (read = getline(&line, &len, instream)) != -1) {
-
         // ignore blank lines
         allspace = 1;
         if (strcmp("\n", line) == 0) continue;
@@ -402,17 +405,6 @@ int main(int argc, char *argv[]) {
             token = strtok(NULL, delim);
         }
 
-        // exit gracefully if user inputs "exit"
-        if (strcmp(tokens[0], EXIT) == 0) {
-            if (cnt != 1) { shell_rc = -1; continue; }
-            else {
-                freev((void*)tokens, ntoks, 1);
-                free(line);
-                free_locals();
-                free_history(hhead);
-                exit(shell_rc);
-            }
-        }
 
         // 1. log in history (excluding builtins)
         int isbuiltin = 0;
@@ -420,26 +412,163 @@ int main(int argc, char *argv[]) {
             if (strcmp(tokens[0], builtins[i]) == 0) { isbuiltin = 1; break; }
         if (!isbuiltin) log_in_history(cnt, tokens);
 
-        // 2. parse
-        char **parsed_tokens;
-        if ((parsed_tokens = parse_cmd(cnt, tokens)) == NULL) {
-            shell_rc = -1;
+        // 2. handle redirections
+        int redir_rc = 1;
+        for (size_t r = 0; r < TOTAL_REDIRECTIONS; r++) {
+            char *redir = NULL;
+            char *dup_arg = strdup(tokens[cnt - 1]);
+            if ((redir = strstr(dup_arg, redirects[r])) != NULL) {
+                // check if it precedes with a fd num
+                char *ptr = tokens[cnt - 1];
+                int fd = -1;
+                while (isdigit(*ptr) != 0) {
+                    if (fd == -1) fd = 0;
+                    fd = fd * 10 + (*ptr - '0');
+                    ptr++;
+                }
+
+                *redir = '\0';
+                redir += strlen(redirects[r]);
+                if (redir != NULL) {
+                    old_stdout = dup(STDOUT_FILENO);
+                    old_stdin = dup(STDIN_FILENO);
+                    old_stderr = dup(STDERR_FILENO);
+                    if ((redir_rc = (*redirect_fn[r])(redir, fd)) == -1)
+                        shell_rc = redir_rc;
+                    free(dup_arg);
+                    break;
+                }
+            }
+            free(dup_arg);
         }
-        // 3. execute
-        else {
-            shell_rc = exec_cmd(cnt, parsed_tokens);
-            freev((void*)parsed_tokens, cnt, 1);
+
+        if (redir_rc >= 0) {
+            if (redir_rc == 0) cnt--;
+
+            // exit gracefully if user inputs "exit"
+            if (strcmp(tokens[0], EXIT) == 0) {
+                if (cnt != 1) { shell_rc = -1; continue; }
+                else {
+                    close(old_stdout);
+                    close(old_stdin);
+                    close(old_stderr);
+                    fclose(instream);
+                    freev((void*)tokens, ntoks, 1);
+                    free(line);
+                    free_locals();
+                    free_history(hhead);
+                    exit(shell_rc);
+                }
+            }
+
+            // 3. parse vars
+            char **parsed_tokens;
+            if ((parsed_tokens = parse_cmd(cnt, tokens)) == NULL) {
+                shell_rc = -1;
+            }
+
+            // 3. execute
+            else {
+                shell_rc = exec_cmd(cnt, parsed_tokens);
+                dup2(STDOUT_FILENO, old_stdout);
+                dup2(STDIN_FILENO, old_stdin);
+                dup2(STDERR_FILENO, old_stderr);
+                freev((void*)parsed_tokens, cnt, 1);
+            }
         }
         freev((void*)tokens, ntoks, 1);
     }
+    close(old_stdout);
+    close(old_stdin);
+    close(old_stderr);
     fclose(instream);
     free(line);
     free_locals();
-    if (histsize != 0) free_history(hhead);
+    free_history(hhead);
     return shell_rc;
 }
 
 
+// --------REDIRECTIONS---------
+//
+// &>>
+int a_rerrout(char *fname, int fd) {
+    if (fname == NULL || fd != -1) return -1;
+
+    int file;
+    file = open(fname, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+    if (file == -1) return -1;
+
+    dup2(file, STDOUT_FILENO);
+    dup2(file, STDERR_FILENO);
+
+    close(file);
+    return 0;
+}
+
+// &>
+int r_errout(char *fname, int fd) {
+    if (fname == NULL || fd != -1) return -1;
+
+    int file;
+    file = open(fname, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (file == -1) return -1;
+
+    dup2(file, STDOUT_FILENO);
+    dup2(file, STDERR_FILENO);
+
+    close(file);
+    return 0;
+}
+
+// >>
+int a_routput(char *fname, int fd) {
+    if (fname == NULL) return -1;
+
+    int file;
+    file = open(fname, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+    if (file == -1) return -1;
+
+    if (fd == -1) dup2(file, STDOUT_FILENO);
+    else dup2(file, fd);
+
+    close(file);
+    return 0;
+}
+
+// >
+int r_output(char *fname, int fd) {
+    if (fname == NULL) return -1;
+
+    int file;
+    file = open(fname, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (file == -1) return -1;
+
+    if (fd == -1) dup2(file, STDOUT_FILENO);
+    else dup2(file, fd);
+
+    close(file);
+    return 0;
+}
+
+// <
+int r_input(char *fname, int fd) {
+    if (fname == NULL) return -1;
+
+    int file;
+    file = open(fname, O_RDONLY, S_IRUSR);
+    if (file == -1) return -1;
+
+    if (fd == -1) dup2(file, STDIN_FILENO);
+    else dup2(file, fd);
+
+    close(file);
+    return 0;
+}
+
+
+// --------BUILT-IN COMMANDS---------
+//
 // Usage: cd <dir-path>
 int wsh_cd(size_t argc, char** args) {
     if (argc != 2) return -1;
@@ -494,13 +623,6 @@ int wsh_local(size_t argc, char** args) {
         tokens[cnt] = malloc(strlen(token) + 1);
         strcpy(tokens[cnt++], token);
         token = strtok(NULL, delim);
-    }
-
-    // should have atleast 2 tokens for key-val pair
-    if (cnt < nvars) {
-        free(dup_arg);
-        freev((void*)tokens, nvars, 1);
-        return -1;
     }
 
     localvar *newvar = malloc(sizeof(localvar));
@@ -591,12 +713,7 @@ int wsh_history(size_t argc, char** args) {
         long val = strtol(args[2], &endptr, 10);
         if (errno == ERANGE || *endptr != '\0' || val < 0) return -1;
         histsize = (size_t)val;
-        // TO-DO: head not clearing
-        if (histsize == 0) {
-            histentries = 0;
-            free_history(hhead);
-            return 0;
-        }
+        if (histsize == 0) return -1;
 
         // drop extra entries
         if (histsize < histentries) {
