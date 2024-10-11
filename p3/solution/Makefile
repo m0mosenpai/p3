@@ -12,9 +12,11 @@ DEPS = wsh.h
 OBJS = wsh.o
 TARGET = wsh
 LOGIN = m0mosenpai
-SUBMITPATH = /usr/home/~cs537-1/handin/${LOGIN}
+SUBMITPATH = /home/~cs537-1/handin/${LOGIN}
 
 all: ${TARGET} ${TARGET}-dbg
+
+submit: cp -r ../../p3 ${SUBMITPATH}
 
 %.o: %.c %.h
 	$(CC) $< -c $(CFLAGS)
@@ -28,7 +30,6 @@ $(TARGET)-dbg: $(SRC) ${OBJS}
 clean:
 	rm -f $(TARGET) $(TARGET)-dbg ${OBJS}
 
-# to-do:
 test:
 	make clean
 	cd tests
@@ -38,4 +39,4 @@ submit:
 	cd $(SUBMITPATH)/p3
 	make clean
 
-.PHONY: all clean
+.PHONY: all submit clean
