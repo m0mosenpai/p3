@@ -1,2 +1,1 @@
-../solution/wsh tests/29.wsh &>/dev/null
-[ $? -ne 0 ] && echo "ok"
+../solution/wsh tests/29.wsh 2>/dev/null

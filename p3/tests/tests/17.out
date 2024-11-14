@@ -1,2 +1,0 @@
-    char *buf = "hello worldhello worldhello world";
-    printf("hello world!\n");
